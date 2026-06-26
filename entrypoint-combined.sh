@@ -34,10 +34,14 @@ export STORE_DIR
 export API_PORT="$BRIDGE_PORT"
 export API_BIND_HOST="127.0.0.1"
 # The bridge resolves its data under STORE_DIR; run it from a stable cwd.
+# CRITICAL: redirect the bridge's stdout to stderr. This entrypoint's stdout is
+# the MCP stdio JSON-RPC channel (the wrapper reads MCP protocol from it once we
+# exec the Python server below). The bridge logs + prints a QR to stdout, which
+# would corrupt that protocol stream. Send all bridge output to stderr instead.
 (
   cd /app/whatsapp-bridge
   exec ./whatsapp-bridge
-) &
+) 1>&2 &
 BRIDGE_PID=$!
 
 # Ensure the bridge dies with us (idle-reap, crash, or normal exit).
