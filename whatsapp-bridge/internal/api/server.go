@@ -2,7 +2,9 @@ package api
 
 import (
 	"fmt"
+	"net"
 	"net/http"
+	"os"
 
 	"whatsapp-bridge/internal/database"
 	"whatsapp-bridge/internal/webhook"
@@ -35,8 +37,41 @@ func NewServer(client *whatsapp.Client, messageStore *database.MessageStore, web
 }
 
 // Start launches the HTTP server in a background goroutine.
+//
+// When the API_SOCKET environment variable is set, the server binds a UNIX
+// domain socket at that path (removing any stale socket file first) instead of
+// listening on a TCP port. The socket is chmod'd to 0660 so a same-uid client
+// (e.g. the Python MCP server) can connect. When API_SOCKET is unset, the
+// server falls back to the configured TCP bind host and port.
 func (s *Server) Start() {
 	s.registerHandlers()
+
+	if socketPath := os.Getenv("API_SOCKET"); socketPath != "" {
+		fmt.Printf("Starting REST API server on UNIX socket %s...\n", socketPath)
+
+		// Remove any stale socket left over from a previous run; a lingering
+		// file would otherwise make net.Listen fail with "address in use".
+		_ = os.Remove(socketPath)
+
+		ln, err := net.Listen("unix", socketPath)
+		if err != nil {
+			fmt.Printf("REST API server error: failed to listen on UNIX socket %s: %v\n", socketPath, err)
+			return
+		}
+
+		// Allow same-uid clients (e.g. the Python MCP server in our container)
+		// to connect. A chmod failure is non-fatal — log and continue.
+		if err := os.Chmod(socketPath, 0660); err != nil {
+			fmt.Printf("REST API server warning: failed to chmod UNIX socket %s: %v\n", socketPath, err)
+		}
+
+		go func() {
+			if err := http.Serve(ln, nil); err != nil {
+				fmt.Printf("REST API server error: %v\n", err)
+			}
+		}()
+		return
+	}
 
 	serverAddr := fmt.Sprintf("%s:%d", s.bindHost, s.port)
 	fmt.Printf("Starting REST API server on %s...\n", serverAddr)
@@ -107,6 +142,8 @@ func (s *Server) registerHandlers() {
 	http.HandleFunc("/api/archive", SecureMiddleware(s.handleArchiveChat))
 
 	// Phase 7: Phone Number Pairing
+	http.HandleFunc("/api/qr", SecureMiddleware(s.handleGetQR))
+	http.HandleFunc("/api/logout", SecureMiddleware(s.handleLogout))
 	http.HandleFunc("/api/pair", SecureMiddleware(s.handlePairPhone))
 	http.HandleFunc("/api/pairing", SecureMiddleware(s.handlePairingStatus))
 	http.HandleFunc("/api/connection", SecureMiddleware(s.handleConnectionStatus))

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"whatsapp-bridge/internal/config"
 	"whatsapp-bridge/internal/database"
 
 	"go.mau.fi/whatsmeow"
@@ -341,7 +342,7 @@ func (c *Client) historyMessageSender(chat types.JID, key *waCommon.MessageKey) 
 func (c *Client) autoDownloadMedia(msgID, chatJID, mediaType, filename, rawURL, directPath string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64) {
 	// Sanitize JID for filesystem (replace colons and other special chars)
 	sanitizedJID := regexp.MustCompile(`[^a-zA-Z0-9._-]`).ReplaceAllString(chatJID, "_")
-	outDir := filepath.Join("store", sanitizedJID)
+	outDir := filepath.Join(config.StoreDir(), sanitizedJID)
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		c.logger.Warnf("auto-download: mkdir %s: %v", outDir, err)
 		return

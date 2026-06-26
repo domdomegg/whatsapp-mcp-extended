@@ -3,8 +3,11 @@ package antiban
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"time"
+
+	"whatsapp-bridge/internal/config"
 )
 
 type MessageType int
@@ -41,7 +44,7 @@ func LoadConfig() *Config {
 		TypingMsPerChar:    loadIntEnv("ANTIBAN_TYPING_MS_PER_CHAR", 30),
 		WarmUpDays:         loadIntEnv("ANTIBAN_WARMUP_DAYS", 7),
 		WarmUpStartLimit:   loadIntEnv("ANTIBAN_WARMUP_START_LIMIT", 20),
-		WarmUpStatePath:    loadStringEnv("ANTIBAN_WARMUP_STATE_PATH", "store/antiban_warmup.json"),
+		WarmUpStatePath:    loadStringEnv("ANTIBAN_WARMUP_STATE_PATH", filepath.Join(config.StoreDir(), "antiban_warmup.json")),
 		RiskPauseThreshold: loadIntEnv("ANTIBAN_RISK_PAUSE_THRESHOLD", 70),
 	}
 }

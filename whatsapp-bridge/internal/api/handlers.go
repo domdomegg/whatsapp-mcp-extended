@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -1656,6 +1657,44 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// handleGetQR returns the current QR pairing code, if any, so a client can
+// render it instead of reading it from the terminal.
+// GET /api/qr
+// Response: { "qr": "<current code or empty>", "needs_pairing": <bool> }
+func (s *Server) handleGetQR(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		SendJSONError(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	resp := map[string]interface{}{
+		"qr":            s.client.CurrentQR(),
+		"needs_pairing": s.client.Store.ID == nil, // true when Store.ID == nil: QR or pairing code required
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// handleLogout logs out and unlinks the WhatsApp account, wiping the stored
+// session so the next connection requires a fresh QR scan.
+// POST /api/logout
+// Response: { "success": <bool>, "error": <string, on failure> }
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		SendJSONError(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if err := s.client.Client.Logout(context.Background()); err != nil {
+		SendJSONError(w, fmt.Sprintf("Failed to log out: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
 }
 
 // handleReconnect forces a disconnect and reconnect of the WhatsApp client.

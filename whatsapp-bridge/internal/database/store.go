@@ -4,8 +4,11 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	_ "github.com/mattn/go-sqlite3"
+
+	"whatsapp-bridge/internal/config"
 )
 
 // MessageStore handles database operations for storing message history and webhook configurations
@@ -16,13 +19,15 @@ type MessageStore struct {
 // NewMessageStore initializes a new message store with SQLite database
 func NewMessageStore() (*MessageStore, error) {
 	// Create directory for database if it doesn't exist
-	if err := os.MkdirAll("store", 0755); err != nil {
+	storeDir := config.StoreDir()
+	if err := os.MkdirAll(storeDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create store directory: %v", err)
 	}
 
 	// WAL mode: allows concurrent readers + one writer, preventing SQLITE_BUSY when
 	// the MCP server and bridge access the same file simultaneously.
-	db, err := sql.Open("sqlite3", "file:store/messages.db?_foreign_keys=on&_journal_mode=WAL&_busy_timeout=5000")
+	dsn := fmt.Sprintf("file:%s?_foreign_keys=on&_journal_mode=WAL&_busy_timeout=5000", filepath.Join(storeDir, "messages.db"))
+	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open message database: %v", err)
 	}

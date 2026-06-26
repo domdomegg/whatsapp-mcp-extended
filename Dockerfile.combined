@@ -1,0 +1,55 @@
+# Combined image: Go bridge + Python MCP server in one container, driven by the
+# combined entrypoint so the (stdio) MCP server supervises its own per-user
+# bridge. Intended to run under mcp-auth-wrapper (one spawn per user).
+
+# --- stage 1: build the Go bridge -------------------------------------------
+FROM golang:latest AS bridge-builder
+ENV CGO_ENABLED=1
+ENV GO111MODULE=on
+WORKDIR /app
+COPY ./whatsapp-bridge /app/whatsapp-bridge
+WORKDIR /app/whatsapp-bridge
+RUN go mod download && go build -o whatsapp-bridge
+
+# --- stage 2: build the Python venv -----------------------------------------
+FROM python:3.13-slim AS py-builder
+RUN pip install --no-cache-dir uv
+WORKDIR /app
+COPY ./whatsapp-mcp-server/requirements.txt .
+# gradio* are only used by the local dev UI (gradio-main.py), not main.py.
+RUN grep -vE "^gradio" requirements.txt > requirements-docker.txt \
+    && uv venv /opt/venv \
+    && uv pip install --python /opt/venv --no-cache -r requirements-docker.txt
+
+# --- stage 3: runtime --------------------------------------------------------
+FROM python:3.13-slim AS runtime
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    sqlite3 \
+    ca-certificates \
+    wget \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=py-builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+ARG UID=1000
+ARG GID=1000
+RUN groupadd -g ${GID} appuser && useradd -l -u ${UID} -g appuser appuser
+
+WORKDIR /app
+COPY --from=bridge-builder /app/whatsapp-bridge/whatsapp-bridge /app/whatsapp-bridge/whatsapp-bridge
+COPY ./whatsapp-mcp-server /app/whatsapp-mcp-server
+COPY ./entrypoint-combined.sh /app/entrypoint-combined.sh
+
+RUN chmod +x /app/whatsapp-bridge/whatsapp-bridge /app/entrypoint-combined.sh \
+    && mkdir -p /app/data \
+    && chown -R appuser:appuser /app
+
+USER appuser
+# Per-user data (one store/<user>/ subdir each) lives under /app/data.
+VOLUME ["/app/data"]
+ENV DATA_ROOT=/app/data
+# No EXPOSE: the wrapper speaks to this over stdio; the bridge listens only on
+# loopback inside the container.
+ENTRYPOINT ["/app/entrypoint-combined.sh"]

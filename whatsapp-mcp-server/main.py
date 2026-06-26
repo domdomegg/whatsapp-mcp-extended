@@ -6,11 +6,11 @@ from pathlib import Path
 from typing import Any, Literal
 
 import requests as _requests
-
-from lib.utils import WHATSAPP_API_BASE_URL as _BRIDGE_URL
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.utilities.types import Image
 from mcp.types import ToolAnnotations
+
+from lib.utils import WHATSAPP_API_BASE_URL as _BRIDGE_URL
 
 # Phase 2: Group Management
 from whatsapp import add_group_members as whatsapp_add_group_members
@@ -35,6 +35,8 @@ from whatsapp import get_group_info as whatsapp_get_group_info
 from whatsapp import get_last_interaction as whatsapp_get_last_interaction
 from whatsapp import get_message_context as whatsapp_get_message_context
 from whatsapp import get_profile_picture as whatsapp_get_profile_picture
+from whatsapp import get_setup_qr as whatsapp_get_setup_qr
+from whatsapp import get_setup_status as whatsapp_get_setup_status
 from whatsapp import leave_group as whatsapp_leave_group
 from whatsapp import list_all_contacts as whatsapp_list_all_contacts
 from whatsapp import list_chats as whatsapp_list_chats
@@ -58,6 +60,7 @@ from whatsapp import set_contact_nickname as whatsapp_set_contact_nickname
 from whatsapp import set_presence as whatsapp_set_presence
 from whatsapp import subscribe_presence as whatsapp_subscribe_presence
 from whatsapp import unfollow_newsletter as whatsapp_unfollow_newsletter
+from whatsapp import unlink_account as whatsapp_unlink_account
 from whatsapp import update_blocklist as whatsapp_update_blocklist
 from whatsapp import update_group as whatsapp_update_group
 
@@ -351,6 +354,66 @@ def download_media(message_id: str, chat_jid: str) -> Any:
     if Path(file_path).suffix.lower() in _INLINE_IMAGE_EXTS:
         return [Image(path=file_path), status]
     return status
+
+
+@tool("account_admin", "Get Setup QR", read_only=True)
+def get_setup_qr() -> Any:
+    """Get the WhatsApp linking QR code to connect this account.
+
+    Call this when the account is not yet linked (see `setup_status`). Scan the
+    returned QR code from WhatsApp on your phone: Settings > Linked Devices >
+    Link a Device. The QR rotates periodically — call again for a fresh one.
+
+    Returns:
+        If linking is needed: a list with [QR image, status dict].
+        If already linked: a status dict with needs_pairing=False.
+    """
+    result = whatsapp_get_setup_qr()
+    if "error" in result:
+        return {"success": False, "error": result["error"]}
+
+    if not result.get("needs_pairing") or not result.get("qr"):
+        return {"success": True, "needs_pairing": False, "message": "Account already linked."}
+
+    import io
+
+    import qrcode
+
+    qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=10, border=4)
+    qr.add_data(result["qr"])
+    qr.make(fit=True)
+    buf = io.BytesIO()
+    qr.make_image(fill_color="black", back_color="white").save(buf, format="PNG")
+    status = {
+        "success": True,
+        "needs_pairing": True,
+        "message": "Scan this QR in WhatsApp > Linked Devices > Link a Device. It rotates; call again for a fresh code.",
+    }
+    return [Image(data=buf.getvalue(), format="png"), status]
+
+
+@tool("account_admin", "Setup Status", read_only=True, idempotent=True, open_world=False)
+def setup_status() -> dict[str, Any]:
+    """Check whether this WhatsApp account is linked and connected.
+
+    Returns:
+        A dict with `needs_pairing` (True if a QR scan is required via
+        `get_setup_qr`), `connected`, and other bridge sync-status fields.
+    """
+    return whatsapp_get_setup_status()
+
+
+@tool("account_admin", "Unlink Account", read_only=False, destructive=True)
+def unlink() -> dict[str, Any]:
+    """Log out and unlink this WhatsApp account, wiping the local session.
+
+    After unlinking, the account is disconnected and a new QR scan via
+    `get_setup_qr` is required to use it again. Use with care.
+
+    Returns:
+        A dict with success status.
+    """
+    return whatsapp_unlink_account()
 
 
 @tool("core", "List All Contacts", read_only=True, idempotent=True, open_world=False)

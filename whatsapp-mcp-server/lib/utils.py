@@ -44,10 +44,11 @@ logger = setup_logging(os.getenv("DEBUG", "false").lower() == "true")
 
 # Database paths — resolution order:
 #   1. WA_STORE_PATH env var (explicit override)
-#   2. /app/store  (Docker bind mount)
-#   3. <project_root>/whatsapp-bridge/store  (local dev, bridge-relative)
-#   4. <project_root>/store  (legacy / symlink)
-_wa_store_env = os.getenv("WA_STORE_PATH")
+#   2. STORE_DIR env var (shared with the Go bridge, e.g. per-user store dir)
+#   3. /app/store  (Docker bind mount)
+#   4. <project_root>/whatsapp-bridge/store  (local dev, bridge-relative)
+#   5. <project_root>/store  (legacy / symlink)
+_wa_store_env = os.getenv("WA_STORE_PATH") or os.getenv("STORE_DIR")
 if _wa_store_env:
     _store_path = _wa_store_env
 elif os.path.exists("/app/store"):
