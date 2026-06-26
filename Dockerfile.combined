@@ -40,7 +40,12 @@ ENV PATH="/opt/venv/bin:$PATH"
 
 ARG UID=1000
 ARG GID=1000
-RUN groupadd -g ${GID} appuser && useradd -l -u ${UID} -g appuser appuser
+# -m gives appuser a home dir (npm/node need a writable HOME at runtime).
+RUN groupadd -g ${GID} appuser && useradd -lm -u ${UID} -g appuser appuser
+
+# Install mcp-auth-wrapper globally at build time (pinned), so startup needs no
+# npx fetch / network / writable npm cache. 1.3.4 carries the MCP_USER_ID injection.
+RUN npm install -g mcp-auth-wrapper@1.3.4 && npm cache clean --force
 
 WORKDIR /app
 COPY --from=bridge-builder /app/whatsapp-bridge/whatsapp-bridge /app/whatsapp-bridge/whatsapp-bridge
@@ -52,6 +57,7 @@ RUN chmod +x /app/whatsapp-bridge/whatsapp-bridge /app/entrypoint-combined.sh \
     && chown -R appuser:appuser /app
 
 USER appuser
+ENV HOME=/home/appuser
 # Per-user data (one store/<user>/ subdir each) lives under /app/data.
 VOLUME ["/app/data"]
 ENV DATA_ROOT=/app/data
@@ -59,4 +65,4 @@ ENV DATA_ROOT=/app/data
 # which exposes streamable HTTP + OIDC on port 3000 and spawns the combined
 # entrypoint per user. The bridge listens only on loopback inside the container.
 EXPOSE 3000
-ENTRYPOINT ["npx", "-y", "mcp-auth-wrapper"]
+ENTRYPOINT ["mcp-auth-wrapper"]
