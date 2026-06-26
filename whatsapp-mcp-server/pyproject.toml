@@ -14,7 +14,7 @@ dependencies = [
     "uvicorn>=0.23.2",
     "urllib3>=2.6.3",
     "h11>=0.16.0",
-    "qrcode>=8.0",
+    "qrcode[pil]>=8.0",
 ]
 
 [project.optional-dependencies]
