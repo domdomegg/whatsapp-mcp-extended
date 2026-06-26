@@ -23,6 +23,17 @@ type Config struct {
 	PresencePingInterval time.Duration
 }
 
+// StoreDir returns the directory used for the bridge's data (databases, media,
+// anti-ban state). It is configured via the STORE_DIR environment variable and
+// defaults to "store". Distinct values allow multiple per-user bridge instances
+// to use separate directories (e.g. "store/<userid>").
+func StoreDir() string {
+	if d := os.Getenv("STORE_DIR"); d != "" {
+		return d
+	}
+	return "store"
+}
+
 // NewConfig creates a new configuration with default values
 func NewConfig() *Config {
 	cfg := &Config{

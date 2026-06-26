@@ -18,10 +18,13 @@ from .bridge import (
     delete_message,
     edit_message,
     get_group_info,
+    get_qr,
+    get_setup_status,
     mark_read,
     send_file,
     send_message,
     send_reaction,
+    unlink_account,
 )
 
 # Database operations
@@ -74,6 +77,9 @@ __all__ = [
     "get_group_info",
     "create_group",
     "create_poll",
+    "get_qr",
+    "get_setup_status",
+    "unlink_account",
     # Utils
     "logger",
     "setup_logging",

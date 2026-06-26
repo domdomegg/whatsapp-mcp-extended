@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/hkdf"
+
+	"whatsapp-bridge/internal/config"
 )
 
 // maxMediaBytes caps the encrypted payload accepted from the WhatsApp CDN to
@@ -160,8 +162,8 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	}
 	plain = plain[:len(plain)-pad]
 
-	// Persist under store/media/<chat_jid>/<message_id><ext> (relative to bridge cwd).
-	storeDir := filepath.Join("store", "media", sanitizePath(req.ChatJID))
+	// Persist under <STORE_DIR>/media/<chat_jid>/<message_id><ext> (relative to bridge cwd).
+	storeDir := filepath.Join(config.StoreDir(), "media", sanitizePath(req.ChatJID))
 	if err := os.MkdirAll(storeDir, 0o755); err != nil {
 		SendJSONError(w, "mkdir failed: "+err.Error(), http.StatusInternalServerError)
 		return

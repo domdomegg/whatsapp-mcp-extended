@@ -31,7 +31,6 @@ import audio
 from lib.bridge import _get_headers
 from lib.utils import MESSAGES_DB_PATH, WHATSAPP_DB_PATH
 
-
 # Use environment variable for bridge host, default to localhost:8080 for development
 # BRIDGE_HOST can be "hostname" (uses :8080) or "hostname:port" (uses specified port)
 _bridge_host = os.getenv("BRIDGE_HOST", "localhost:8080")
@@ -2357,3 +2356,66 @@ def archive_chat(chat_jid: str, archive: bool = True) -> dict[str, Any]:
             return {"success": False, "chat_jid": chat_jid, "error": f"HTTP {response.status_code} - {response.text}"}
     except requests.RequestException as e:
         return {"success": False, "chat_jid": chat_jid, "error": f"Request error: {str(e)}"}
+
+
+def get_setup_qr() -> dict[str, Any]:
+    """Fetch the current pairing QR code from the bridge.
+
+    Returns:
+        Dict with `qr` (raw QR string, empty when already linked) and
+        `needs_pairing` (bool), or `error` on failure.
+    """
+    try:
+        url = f"{WHATSAPP_API_BASE_URL}/qr"
+        response = requests.get(url, headers=_get_headers(), timeout=30)
+        if response.status_code == 200:
+            return response.json()
+        return {"error": f"HTTP {response.status_code} - {response.text}"}
+    except requests.RequestException as e:
+        return {"error": f"Request error: {str(e)}"}
+
+
+def get_setup_status() -> dict[str, Any]:
+    """Fetch the account link/sync status from the bridge.
+
+    Combines the bridge sync-status payload with the authoritative
+    `needs_pairing` flag (from the QR endpoint), so callers can tell in one call
+    whether the account still needs linking.
+
+    Returns:
+        A dict with `needs_pairing` plus sync-status fields, or `error`.
+    """
+    try:
+        headers = _get_headers()
+        result: dict[str, Any] = {}
+
+        sync = requests.get(f"{WHATSAPP_API_BASE_URL}/sync-status", headers=headers, timeout=30)
+        if sync.status_code in (200, 503):
+            result.update(sync.json())
+        else:
+            return {"error": f"HTTP {sync.status_code} - {sync.text}"}
+
+        # sync-status doesn't carry needs_pairing; the QR endpoint does.
+        qr = requests.get(f"{WHATSAPP_API_BASE_URL}/qr", headers=headers, timeout=30)
+        if qr.status_code == 200:
+            result["needs_pairing"] = qr.json().get("needs_pairing")
+
+        return result
+    except requests.RequestException as e:
+        return {"error": f"Request error: {str(e)}"}
+
+
+def unlink_account() -> dict[str, Any]:
+    """Log out and unlink the WhatsApp account, wiping the local session.
+
+    Returns:
+        Dict with `success`, or `error` on failure.
+    """
+    try:
+        url = f"{WHATSAPP_API_BASE_URL}/logout"
+        response = requests.post(url, headers=_get_headers(), timeout=30)
+        if response.status_code == 200:
+            return response.json()
+        return {"success": False, "error": f"HTTP {response.status_code} - {response.text}"}
+    except requests.RequestException as e:
+        return {"success": False, "error": f"Request error: {str(e)}"}

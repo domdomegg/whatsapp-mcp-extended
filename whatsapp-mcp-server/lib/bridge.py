@@ -461,3 +461,60 @@ def archive_chat(chat_jid: str, archive: bool = True) -> dict[str, Any]:
     except requests.RequestException as e:
         logger.error("Bridge API error in archive_chat: %s", e)
         raise BridgeError(f"Failed to archive chat: {e}") from e
+
+
+def get_qr() -> dict[str, Any]:
+    """Get the current pairing QR code (if the account needs linking).
+
+    Returns:
+        Response with `qr` (the raw QR string, empty if already linked) and
+        `needs_pairing` (bool).
+
+    Raises:
+        BridgeError: If API call fails.
+    """
+    try:
+        response = requests.get(f"{WHATSAPP_API_BASE_URL}/qr", headers=_get_headers(), timeout=30)
+        response.raise_for_status()
+        return response.json()
+    except requests.RequestException as e:
+        logger.error("Bridge API error in get_qr: %s", e)
+        raise BridgeError(f"Failed to get QR code: {e}") from e
+
+
+def get_setup_status() -> dict[str, Any]:
+    """Get the account link/sync status.
+
+    Returns:
+        The bridge sync-status payload, including `needs_pairing`.
+
+    Raises:
+        BridgeError: If API call fails.
+    """
+    try:
+        response = requests.get(f"{WHATSAPP_API_BASE_URL}/sync-status", headers=_get_headers(), timeout=30)
+        response.raise_for_status()
+        return response.json()
+    except requests.RequestException as e:
+        logger.error("Bridge API error in get_setup_status: %s", e)
+        raise BridgeError(f"Failed to get setup status: {e}") from e
+
+
+def unlink_account() -> dict[str, Any]:
+    """Log out and unlink the WhatsApp account, wiping the local session.
+
+    After unlinking, a new QR scan is required to use the account again.
+
+    Returns:
+        Response with success status.
+
+    Raises:
+        BridgeError: If API call fails.
+    """
+    try:
+        response = requests.post(f"{WHATSAPP_API_BASE_URL}/logout", headers=_get_headers(), timeout=30)
+        response.raise_for_status()
+        return response.json()
+    except requests.RequestException as e:
+        logger.error("Bridge API error in unlink_account: %s", e)
+        raise BridgeError(f"Failed to unlink account: {e}") from e

@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -42,6 +43,11 @@ type Client struct {
 	// Anti-ban protection
 	antiban *antiban.SendInterceptor
 
+	// Latest QR pairing code, guarded by qrMu. Set while pairing (evt.Event=="code")
+	// and cleared on successful link (evt.Event=="success"). Exposed via CurrentQR.
+	qrMu      sync.Mutex
+	currentQR string
+
 	// Pairing state
 	pairingMutex      sync.Mutex
 	pairingInProgress bool
@@ -68,7 +74,8 @@ func NewClientWithConfig(logger waLog.Logger, cfg *config.Config) (*Client, erro
 	dbLog := waLog.Stdout("Database", "INFO", true)
 
 	// Create directory for database if it doesn't exist
-	if err := os.MkdirAll("store", 0755); err != nil {
+	storeDir := config.StoreDir()
+	if err := os.MkdirAll(storeDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create store directory: %v", err)
 	}
 
@@ -89,7 +96,8 @@ func NewClientWithConfig(logger waLog.Logger, cfg *config.Config) (*Client, erro
 		cfg.HistorySyncDaysLimit, cfg.HistorySyncSizeMB, cfg.StorageQuotaMB)
 
 	// WAL mode: same as messages.db — allows concurrent readers alongside the bridge writer.
-	container, err := sqlstore.New(context.Background(), "sqlite3", "file:store/whatsapp.db?_foreign_keys=on&_journal_mode=WAL&_busy_timeout=5000", dbLog)
+	dsn := fmt.Sprintf("file:%s?_foreign_keys=on&_journal_mode=WAL&_busy_timeout=5000", filepath.Join(storeDir, "whatsapp.db"))
+	container, err := sqlstore.New(context.Background(), "sqlite3", dsn, dbLog)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to database: %v", err)
 	}
@@ -164,6 +172,22 @@ func (c *Client) SetCircuitBreakerCallback(fn func()) {
 	c.circuitBreakerCallback = fn
 }
 
+// setCurrentQR stores the latest QR pairing code in a thread-safe manner.
+// Pass an empty string to clear it once pairing succeeds.
+func (c *Client) setCurrentQR(code string) {
+	c.qrMu.Lock()
+	defer c.qrMu.Unlock()
+	c.currentQR = code
+}
+
+// CurrentQR returns the latest QR pairing code emitted during pairing,
+// or an empty string when no pairing is in progress (or pairing has succeeded).
+func (c *Client) CurrentQR() string {
+	c.qrMu.Lock()
+	defer c.qrMu.Unlock()
+	return c.currentQR
+}
+
 // Connect establishes connection to WhatsApp servers.
 // For new devices, displays QR code for phone pairing.
 // For existing sessions, reconnects using stored credentials.
@@ -182,9 +206,11 @@ func (c *Client) Connect() error {
 		// Print QR code for pairing with phone
 		for evt := range qrChan {
 			if evt.Event == "code" {
+				c.setCurrentQR(evt.Code)
 				fmt.Println("\nScan this QR code with your WhatsApp app:")
 				qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
 			} else if evt.Event == "success" {
+				c.setCurrentQR("")
 				connected <- true
 				break
 			}

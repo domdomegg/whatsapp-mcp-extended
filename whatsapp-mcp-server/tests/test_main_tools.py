@@ -17,6 +17,7 @@ DEFAULT_TOOLS = {
     "get_group_info",
     "create_poll",
     "get_profile_picture",
+    "get_direct_chat_by_contact",
 }
 
 ALL_TOOLS = DEFAULT_TOOLS | {
@@ -31,6 +32,9 @@ ALL_TOOLS = DEFAULT_TOOLS | {
     "get_blocklist",
     "manage_blocklist",
     "manage_newsletter",
+    "get_setup_qr",
+    "setup_status",
+    "unlink",
 }
 
 
