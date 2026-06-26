@@ -22,12 +22,17 @@ RUN grep -vE "^gradio" requirements.txt > requirements-docker.txt \
     && uv pip install --python /opt/venv --no-cache -r requirements-docker.txt
 
 # --- stage 3: runtime --------------------------------------------------------
+# Bundles the Go bridge binary, the Python venv, Node + mcp-auth-wrapper, so the
+# wrapper (entrypoint) handles OIDC and spawns one combined per-user stdio MCP
+# server (entrypoint-combined.sh) per authenticated user.
 FROM python:3.13-slim AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     sqlite3 \
     ca-certificates \
     wget \
+    nodejs \
+    npm \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=py-builder /opt/venv /opt/venv
@@ -50,6 +55,8 @@ USER appuser
 # Per-user data (one store/<user>/ subdir each) lives under /app/data.
 VOLUME ["/app/data"]
 ENV DATA_ROOT=/app/data
-# No EXPOSE: the wrapper speaks to this over stdio; the bridge listens only on
-# loopback inside the container.
-ENTRYPOINT ["/app/entrypoint-combined.sh"]
+# The container runs mcp-auth-wrapper (configured via MCP_AUTH_WRAPPER_CONFIG),
+# which exposes streamable HTTP + OIDC on port 3000 and spawns the combined
+# entrypoint per user. The bridge listens only on loopback inside the container.
+EXPOSE 3000
+ENTRYPOINT ["npx", "-y", "mcp-auth-wrapper"]
