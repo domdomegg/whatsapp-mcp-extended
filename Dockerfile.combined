@@ -1,6 +1,12 @@
 # Combined image: Go bridge + Python MCP server in one container, driven by the
 # combined entrypoint so the (stdio) MCP server supervises its own per-user
 # bridge. Intended to run under mcp-auth-wrapper (one spawn per user).
+#
+# Base is node:lts-slim (Debian/glibc) to match the homelab's Node base family
+# and give mcp-auth-wrapper a modern Node (it uses the built-in node:sqlite,
+# Node 22+). glibc (not alpine/musl) so the cgo-built Go bridge runs as-is.
+# Python comes from a uv-managed standalone interpreter, so it's independent of
+# whatever python3 the base ships.
 
 # --- stage 1: build the Go bridge -------------------------------------------
 FROM golang:latest AS bridge-builder
@@ -12,20 +18,26 @@ WORKDIR /app/whatsapp-bridge
 RUN go mod download && go build -o whatsapp-bridge
 
 # --- stage 2: build the Python venv -----------------------------------------
-FROM python:3.13-slim AS py-builder
-RUN pip install --no-cache-dir uv
+# Uses uv with its own standalone CPython, so the venv doesn't depend on the
+# runtime base's apt python. Copied wholesale into the runtime stage.
+FROM debian:bookworm-slim AS py-builder
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+ENV UV_PYTHON_INSTALL_DIR=/opt/python
 WORKDIR /app
 COPY ./whatsapp-mcp-server/requirements.txt .
 # gradio* are only used by the local dev UI (gradio-main.py), not main.py.
 RUN grep -vE "^gradio" requirements.txt > requirements-docker.txt \
-    && uv venv /opt/venv \
+    && uv python install 3.13 \
+    && uv venv --python 3.13 /opt/venv \
     && uv pip install --python /opt/venv --no-cache -r requirements-docker.txt
 
 # --- stage 3: runtime --------------------------------------------------------
-# Bundles the Go bridge binary, the Python venv, Node + mcp-auth-wrapper, so the
-# wrapper (entrypoint) handles OIDC and spawns one combined per-user stdio MCP
-# server (entrypoint-combined.sh) per authenticated user.
-FROM python:3.13-slim AS runtime
+# Bundles the Go bridge binary, the uv-built Python venv (+ its interpreter), and
+# mcp-auth-wrapper; the wrapper (entrypoint) handles OIDC and spawns one combined
+# per-user stdio MCP server (entrypoint-combined.sh) per authenticated user.
+FROM node:lts-slim AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     sqlite3 \
@@ -33,21 +45,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     && rm -rf /var/lib/apt/lists/*
 
-# Node 22+ (for mcp-auth-wrapper, which uses the built-in node:sqlite module added
-# in Node 22). Debian's `nodejs` package is Node 20, so pull Node from the official
-# image (same bookworm base → compatible). Symlink npm/npx into PATH.
-COPY --from=node:22-bookworm-slim /usr/local/bin/node /usr/local/bin/node
-COPY --from=node:22-bookworm-slim /usr/local/lib/node_modules /usr/local/lib/node_modules
-RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
-    && ln -s /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
-
+# Python: the uv standalone interpreter + the venv built against it.
+COPY --from=py-builder /opt/python /opt/python
 COPY --from=py-builder /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-ARG UID=1000
-ARG GID=1000
-# -m gives appuser a home dir (npm/node need a writable HOME at runtime).
-RUN groupadd -g ${GID} appuser && useradd -lm -u ${UID} -g appuser appuser
+# Reuse the base image's existing non-root `node` user (uid/gid 1000).
 
 # Install mcp-auth-wrapper globally at build time (pinned), so startup needs no
 # npx fetch / network / writable npm cache. 1.3.4 carries the MCP_USER_ID injection.
@@ -60,10 +63,10 @@ COPY ./entrypoint-combined.sh /app/entrypoint-combined.sh
 
 RUN chmod +x /app/whatsapp-bridge/whatsapp-bridge /app/entrypoint-combined.sh \
     && mkdir -p /app/data \
-    && chown -R appuser:appuser /app
+    && chown -R node:node /app
 
-USER appuser
-ENV HOME=/home/appuser
+USER node
+ENV HOME=/home/node
 # Per-user data (one store/<user>/ subdir each) lives under /app/data.
 VOLUME ["/app/data"]
 ENV DATA_ROOT=/app/data
