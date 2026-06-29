@@ -35,14 +35,14 @@ RUN grep -vE "^gradio" requirements.txt > requirements-docker.txt \
 
 # --- stage 3: runtime --------------------------------------------------------
 # Bundles the Go bridge binary, the uv-built Python venv (+ its interpreter), and
-# mcp-auth-wrapper; the wrapper (entrypoint) handles OIDC and spawns one combined
-# per-user stdio MCP server (entrypoint-combined.sh) per authenticated user.
+# mcp-auth-wrapper; the wrapper (entrypoint) handles OIDC and spawns one per-user
+# stdio MCP server per authenticated user. That server is run_server.py, which
+# supervises its own Go bridge (no bash entrypoint needed).
 FROM node:lts-slim AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     sqlite3 \
     ca-certificates \
-    wget \
     && rm -rf /var/lib/apt/lists/*
 
 # Python: the uv standalone interpreter + the venv built against it.
@@ -59,9 +59,8 @@ RUN npm install -g mcp-auth-wrapper@1.3.4 && npm cache clean --force
 WORKDIR /app
 COPY --from=bridge-builder /app/whatsapp-bridge/whatsapp-bridge /app/whatsapp-bridge/whatsapp-bridge
 COPY ./whatsapp-mcp-server /app/whatsapp-mcp-server
-COPY ./entrypoint-combined.sh /app/entrypoint-combined.sh
 
-RUN chmod +x /app/whatsapp-bridge/whatsapp-bridge /app/entrypoint-combined.sh \
+RUN chmod +x /app/whatsapp-bridge/whatsapp-bridge \
     && mkdir -p /app/data \
     && chown -R node:node /app
 
