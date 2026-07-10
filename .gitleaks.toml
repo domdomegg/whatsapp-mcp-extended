@@ -1,0 +1,13 @@
+# Extend the default gitleaks ruleset, then allowlist documented example values.
+[extend]
+useDefault = true
+
+# Placeholder secret_token values that appear in webhook configuration examples
+# throughout the docs (and in renamed copies of those docs in git history).
+# These are illustrative, not real credentials.
+[[allowlists]]
+description = "Documented example secret_token values, not real credentials"
+regexTarget = "match"
+regexes = [
+  '''secret_token"?\s*:\s*"(family-secret-123|super_secret_key_123)"''',
+]
