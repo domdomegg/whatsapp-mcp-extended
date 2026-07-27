@@ -2,7 +2,9 @@
 
 An extended Model Context Protocol (MCP) server for WhatsApp with a toolset-gated, agent-facing surface for messaging, search, media, group management, webhooks, presence, and more.
 
-> Built on [AdamRussak/whatsapp-mcp](https://github.com/AdamRussak/whatsapp-mcp) (webhooks, containers) which forked [lharries/whatsapp-mcp](https://github.com/lharries/whatsapp-mcp) (original). Extended with reactions, message editing, polls, group management, presence, newsletters, and more.
+> **This is a fork of [FelixIsaac/whatsapp-mcp-extended](https://github.com/FelixIsaac/whatsapp-mcp-extended)**, which is itself built on [AdamRussak/whatsapp-mcp](https://github.com/AdamRussak/whatsapp-mcp) (webhooks, containers), which forked [lharries/whatsapp-mcp](https://github.com/lharries/whatsapp-mcp) (the original).
+>
+> Everything upstream describes still applies here. This fork adds **multi-user support**: one WhatsApp account per authenticated user behind a single deployment, with self-service QR linking through MCP tools rather than reading a QR code out of the container logs. See [Differences from upstream](#differences-from-upstream).
 
 ![WhatsApp MCP](./example-use.png)
 
@@ -42,7 +44,7 @@ An extended Model Context Protocol (MCP) server for WhatsApp with a toolset-gate
 ### Docker (Recommended)
 
 ```bash
-git clone https://github.com/felixisaac/whatsapp-mcp-extended
+git clone https://github.com/domdomegg/whatsapp-mcp-extended
 cd whatsapp-mcp-extended
 
 docker network create n8n_n8n_traefik_network
@@ -322,12 +324,38 @@ curl http://127.0.0.1:8180/api/health
 # disconnected_for: how long it's been offline
 ```
 
+## Differences from upstream
+
+This fork tracks [FelixIsaac/whatsapp-mcp-extended](https://github.com/FelixIsaac/whatsapp-mcp-extended) and adds one theme on top: running **one WhatsApp account per user** from a single deployment, so each user can link their own account without an admin touching the host.
+
+Upstream assumes a single account with a single `store/` directory, and pairing means reading a QR code out of the container logs. That doesn't work when several people share a deployment.
+
+**Multi-user data separation**
+- `STORE_DIR` env var controls the data directory (databases, media, anti-ban state), which upstream hardcodes to `store/`. Per-user bridges can now use `store/<user-id>/`.
+- `API_SOCKET` env var binds the bridge's REST API to a unix socket instead of a TCP port, so per-user bridges don't contend for ports.
+
+**Self-service onboarding** — three MCP tools that let a user link their own account from the client:
+| Tool | Purpose |
+|---|---|
+| `get_setup_qr` | Returns the pairing QR as an inline image, instead of requiring log access |
+| `setup_status` | Reports link/sync state, including whether pairing is needed |
+| `unlink` | Logs out and unlinks the account |
+
+These are backed by two new bridge endpoints, `GET /api/qr` and `POST /api/logout`.
+
+**Packaging**
+- `Dockerfile.combined` builds a single image where the stdio MCP server supervises its own per-user bridge on a deterministic per-user loopback port and tears it down on exit. Intended to run under a wrapper that spawns one process per authenticated user (e.g. `mcp-auth-wrapper`, which injects `MCP_USER_ID`).
+- A GitHub Actions workflow publishes that combined image to GHCR.
+
+Everything else — the 26-tool surface, webhooks, anti-ban, session reliability — comes from upstream and is documented above. Fixes here that aren't multi-user specific are offered back upstream where they apply.
+
 ## Credits
 
 **Fork chain:**
 - [lharries/whatsapp-mcp](https://github.com/lharries/whatsapp-mcp) - Original MCP server (12 tools)
 - [AdamRussak/whatsapp-mcp](https://github.com/AdamRussak/whatsapp-mcp) - Added webhooks, container split, webhook UI
-- This repo - Added reactions, edit/delete, groups, polls, presence, newsletters, and a curated MCP tool surface
+- [FelixIsaac/whatsapp-mcp-extended](https://github.com/FelixIsaac/whatsapp-mcp-extended) - Added reactions, edit/delete, groups, polls, presence, newsletters, and a curated MCP tool surface
+- This repo - Added per-user store keying and self-service QR onboarding for multi-user deployments
 
 **Libraries:**
 - [whatsmeow](https://github.com/tulir/whatsmeow) - Go WhatsApp Web API
