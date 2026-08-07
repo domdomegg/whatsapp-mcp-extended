@@ -1,7 +1,10 @@
+import base64
+import binascii
 import json
 import os
 import os.path
 import sqlite3
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -29,7 +32,7 @@ except ImportError:
 
 import audio
 from lib.bridge import _get_headers
-from lib.utils import MESSAGES_DB_PATH, WHATSAPP_DB_PATH
+from lib.utils import MESSAGES_DB_PATH, STORE_PATH, WHATSAPP_DB_PATH
 
 # Use environment variable for bridge host, default to localhost:8080 for development
 # BRIDGE_HOST can be "hostname" (uses :8080) or "hostname:port" (uses specified port)
@@ -905,15 +908,61 @@ def send_message(recipient: str, message: str, mentioned_jids: list[str] | None 
         return {"success": False, "error": f"Unexpected error: {str(e)}"}
 
 
-def send_file(recipient: str, media_path: str) -> dict[str, Any]:
-    """Send a file via WhatsApp and return structured result with message_id."""
+def send_file(
+    recipient: str,
+    media_path: str | None = None,
+    file_content_base64: str | None = None,
+    filename: str | None = None,
+) -> dict[str, Any]:
+    """Send a file via WhatsApp and return structured result with message_id.
+
+    Accepts either a path on this server's filesystem, or the file's bytes as
+    base64. The latter exists because MCP clients generally run somewhere else:
+    a client holding a file it just produced has no way to put it on this
+    server's disk, so a path-only interface makes sending it impossible.
+    """
+    temp_path: str | None = None
     try:
         # Validate input
         if not recipient:
             return {"success": False, "error": "Recipient must be provided"}
 
+        if media_path and file_content_base64:
+            return {
+                "success": False,
+                "error": "Provide either media_path or file_content_base64, not both",
+            }
+
+        if file_content_base64:
+            if not filename:
+                return {
+                    "success": False,
+                    "error": "filename must be provided with file_content_base64",
+                }
+
+            try:
+                content = base64.b64decode(file_content_base64, validate=True)
+            except (binascii.Error, ValueError) as e:
+                return {"success": False, "error": f"Invalid base64 content: {str(e)}"}
+
+            # The bridge reads the file off disk, so the bytes have to land
+            # there first. Kept in STORE_DIR rather than /tmp so it shares the
+            # media volume's lifetime and permissions.
+            media_dir = os.path.join(STORE_PATH, "outgoing")
+            os.makedirs(media_dir, exist_ok=True)
+            # Only the basename: a filename like "../x" must not escape.
+            safe_name = os.path.basename(filename) or "upload"
+            fd, temp_path = tempfile.mkstemp(suffix=f"-{safe_name}", dir=media_dir)
+            with os.fdopen(fd, "wb") as f:
+                f.write(content)
+
+            media_path = temp_path
+
         if not media_path:
-            return {"success": False, "error": "Media path must be provided"}
+            return {
+                "success": False,
+                "error": "Either media_path or file_content_base64 must be provided",
+            }
 
         if not os.path.isfile(media_path):
             return {"success": False, "error": f"Media file not found: {media_path}"}
@@ -942,6 +991,14 @@ def send_file(recipient: str, media_path: str) -> dict[str, Any]:
         return {"success": False, "error": f"Error parsing response: {response.text}"}
     except Exception as e:
         return {"success": False, "error": f"Unexpected error: {str(e)}"}
+    finally:
+        # The bridge reads the file synchronously during /send, so it is safe to
+        # remove once that call has returned either way.
+        if temp_path:
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
 
 
 def send_audio_message(recipient: str, media_path: str) -> dict[str, Any]:

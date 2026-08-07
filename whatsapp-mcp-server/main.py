@@ -290,18 +290,35 @@ def send_message(recipient: str, message: str, mentioned_jids: list[str] | None 
 
 
 @tool("media", "Send File", read_only=False)
-def send_file(recipient: str, media_path: str) -> dict[str, Any]:
+def send_file(
+    recipient: str,
+    media_path: str | None = None,
+    file_content_base64: str | None = None,
+    filename: str | None = None,
+) -> dict[str, Any]:
     """Send a file such as a picture, raw audio, video or document via WhatsApp to the specified recipient. For group messages use the JID.
+
+    Provide the file either as a path on the server, or inline as base64.
 
     Args:
         recipient: The recipient - either a phone number with country code but no + or other symbols,
                  or a JID (e.g., "123456789@s.whatsapp.net" or a group JID like "123456789@g.us")
-        media_path: The absolute path to the media file to send (image, video, document)
+        media_path: The absolute path to the media file to send (image, video, document).
+                 This is a path on the *server*, so it only works for files already there.
+        file_content_base64: The file's bytes, base64-encoded. Use this for a local file —
+                 the server cannot read your filesystem. Requires filename.
+        filename: Name for the file, including extension (e.g. "screenshot.png"). Required
+                 with file_content_base64; the extension determines how WhatsApp shows it.
 
     Returns:
         A dictionary containing success status and a status message
+
+    Hints:
+        - Exactly one of media_path or file_content_base64 is required
+        - To send an image you just created locally, base64-encode it and pass
+          file_content_base64 with a filename
     """
-    return whatsapp_send_file(recipient, media_path)
+    return whatsapp_send_file(recipient, media_path, file_content_base64, filename)
 
 
 @tool("media", "Send Audio Message", read_only=False)
