@@ -125,9 +125,9 @@ def test_writes_somewhere_the_bridge_will_read_from(captured_send):
     )
 
     written = os.path.realpath(str(captured_send["media_path"]))
-    assert any(
-        written.startswith(os.path.realpath(allowed)) for allowed in BRIDGE_ALLOWED_DIRS
-    ), f"{written} is outside the bridge's allowed media directories"
+    assert any(written.startswith(os.path.realpath(allowed)) for allowed in BRIDGE_ALLOWED_DIRS), (
+        f"{written} is outside the bridge's allowed media directories"
+    )
 
 
 def test_a_filename_cannot_escape_the_temp_directory(captured_send):
@@ -141,9 +141,7 @@ def test_a_filename_cannot_escape_the_temp_directory(captured_send):
     # rejects any path containing "..", so this must not produce one.
     written = str(captured_send["media_path"])
     assert ".." not in written
-    assert os.path.dirname(written) == os.path.join(
-        whatsapp.MEDIA_TEMP_DIR, "whatsapp-outgoing"
-    )
+    assert os.path.dirname(written) == os.path.join(whatsapp.MEDIA_TEMP_DIR, "whatsapp-outgoing")
 
 
 def test_still_accepts_a_server_side_path(captured_send, tmp_path):
