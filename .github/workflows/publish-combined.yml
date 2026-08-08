@@ -8,10 +8,6 @@ on:
   push:
     branches:
       - main
-      - homelab-per-user-onboarding
-      # Branch builds are tagged with the branch name (type=ref,event=branch),
-      # so the homelab can be pointed at one to try a change before merging.
-      - send-file-base64
     tags:
       - 'v*'
     paths:
@@ -20,6 +16,8 @@ on:
       - 'Dockerfile.combined'
       - 'entrypoint-combined.sh'
       - '.github/workflows/publish-combined.yml'
+  # Run manually against any branch to get an image tagged with that branch
+  # name, for trying a change on a real deployment before merging it.
   workflow_dispatch: {}
 
 jobs:
