@@ -40,8 +40,14 @@ def captured_send(monkeypatch, tmp_path):
         return FakeResponse()
 
     monkeypatch.setattr(whatsapp.requests, "post", fake_post)
-    monkeypatch.setattr(whatsapp, "STORE_PATH", str(tmp_path))
     return seen
+
+
+# Mirrors allowedMediaDirs in whatsapp-bridge/internal/whatsapp/messages.go.
+# The bridge rejects a media_path outside these, so writing somewhere it will
+# not read from fails only at runtime — which is exactly what happened when the
+# temp file was first put under the per-user store.
+BRIDGE_ALLOWED_DIRS = ("/app/media", "/app/store", "/app/whatsapp-bridge/store", "/tmp")
 
 
 def test_sends_a_file_given_as_base64(captured_send):
@@ -110,16 +116,34 @@ def test_rejects_neither_input(captured_send):
     assert "media_path" in result["error"]
 
 
-def test_a_filename_cannot_escape_the_media_directory(captured_send, tmp_path):
+def test_writes_somewhere_the_bridge_will_read_from(captured_send):
+    """The bridge validates media_path against an allowlist before reading it."""
+    whatsapp.send_file(
+        recipient="123",
+        file_content_base64=base64.b64encode(PNG_BYTES).decode(),
+        filename="screenshot.png",
+    )
+
+    written = os.path.realpath(str(captured_send["media_path"]))
+    assert any(
+        written.startswith(os.path.realpath(allowed)) for allowed in BRIDGE_ALLOWED_DIRS
+    ), f"{written} is outside the bridge's allowed media directories"
+
+
+def test_a_filename_cannot_escape_the_temp_directory(captured_send):
     whatsapp.send_file(
         recipient="123",
         file_content_base64=base64.b64encode(PNG_BYTES).decode(),
         filename="../../etc/passwd",
     )
 
-    # Only the basename is used, so the write stays inside the media directory.
+    # Only the basename is used, so the write stays put. The bridge separately
+    # rejects any path containing "..", so this must not produce one.
     written = str(captured_send["media_path"])
-    assert os.path.dirname(written) == os.path.join(str(tmp_path), "outgoing")
+    assert ".." not in written
+    assert os.path.dirname(written) == os.path.join(
+        whatsapp.MEDIA_TEMP_DIR, "whatsapp-outgoing"
+    )
 
 
 def test_still_accepts_a_server_side_path(captured_send, tmp_path):

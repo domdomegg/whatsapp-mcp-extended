@@ -32,7 +32,7 @@ except ImportError:
 
 import audio
 from lib.bridge import _get_headers
-from lib.utils import MESSAGES_DB_PATH, STORE_PATH, WHATSAPP_DB_PATH
+from lib.utils import MESSAGES_DB_PATH, WHATSAPP_DB_PATH
 
 # Use environment variable for bridge host, default to localhost:8080 for development
 # BRIDGE_HOST can be "hostname" (uses :8080) or "hostname:port" (uses specified port)
@@ -41,6 +41,12 @@ if ":" not in _bridge_host:
     _bridge_host = f"{_bridge_host}:8080"
 BRIDGE_HOST = _bridge_host
 WHATSAPP_API_BASE_URL = f"http://{BRIDGE_HOST}/api"
+
+# Where base64 uploads are staged for the bridge to read. Must stay one of the
+# directories allowed by validateMediaPath in the Go bridge
+# (whatsapp-bridge/internal/whatsapp/messages.go); /tmp is the only one of those
+# not tied to a particular deployment layout.
+MEDIA_TEMP_DIR = "/tmp"
 
 
 @dataclass
@@ -946,11 +952,18 @@ def send_file(
                 return {"success": False, "error": f"Invalid base64 content: {str(e)}"}
 
             # The bridge reads the file off disk, so the bytes have to land
-            # there first. Kept in STORE_DIR rather than /tmp so it shares the
-            # media volume's lifetime and permissions.
-            media_dir = os.path.join(STORE_PATH, "outgoing")
+            # there first — and somewhere validateMediaPath allows, which is
+            # /app/media, /app/store, /app/whatsapp-bridge/store or /tmp. The
+            # per-user store (/app/data/store/<user>) is *not* covered, so /tmp
+            # it is; the file is deleted as soon as the send returns anyway.
+            # "/tmp" literally, not tempfile.gettempdir(): the bridge's
+            # allowlist names that exact path, so honouring TMPDIR would put
+            # the file somewhere it refuses to read.
+            media_dir = os.path.join(MEDIA_TEMP_DIR, "whatsapp-outgoing")
             os.makedirs(media_dir, exist_ok=True)
-            # Only the basename: a filename like "../x" must not escape.
+            # Only the basename: a filename like "../x" must not escape. The
+            # bridge also rejects any path containing "..", so a traversal
+            # attempt would fail there too.
             safe_name = os.path.basename(filename) or "upload"
             fd, temp_path = tempfile.mkstemp(suffix=f"-{safe_name}", dir=media_dir)
             with os.fdopen(fd, "wb") as f:
