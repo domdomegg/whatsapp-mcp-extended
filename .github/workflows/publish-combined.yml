@@ -9,6 +9,9 @@ on:
     branches:
       - main
       - homelab-per-user-onboarding
+      # Branch builds are tagged with the branch name (type=ref,event=branch),
+      # so the homelab can be pointed at one to try a change before merging.
+      - send-file-base64
     tags:
       - 'v*'
     paths:

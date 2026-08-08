@@ -13,7 +13,6 @@ import pytest
 
 import whatsapp
 
-
 # A real 1x1 PNG, so the magic bytes can be asserted on.
 PNG_BYTES = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
