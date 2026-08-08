@@ -8,7 +8,6 @@ on:
   push:
     branches:
       - main
-      - homelab-per-user-onboarding
     tags:
       - 'v*'
     paths:
@@ -17,6 +16,8 @@ on:
       - 'Dockerfile.combined'
       - 'entrypoint-combined.sh'
       - '.github/workflows/publish-combined.yml'
+  # Run manually against any branch to get an image tagged with that branch
+  # name, for trying a change on a real deployment before merging it.
   workflow_dispatch: {}
 
 jobs:
