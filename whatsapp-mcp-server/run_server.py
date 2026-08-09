@@ -6,7 +6,9 @@ It owns the Go bridge's lifecycle directly in Python — far more robust than a
 bash entrypoint, which couldn't both exec the server AND reap the bridge.
 
 Design:
-  - Derive a per-user store dir + a deterministic loopback port from MCP_USER_ID.
+  - Derive a store dir from MCP_USER_ID, plus MCP_PROFILE_ID when the wrapper
+    binds a connection to one of several accounts, and a deterministic loopback
+    port from that store dir.
   - Start the Go bridge as a child, set the env the MCP server reads at import.
   - On exit (idle-reap, crash, signal) the bridge is terminated with us — an
     atexit hook plus a try/finally around mcp.run() (which anyio unwinds on
@@ -16,6 +18,7 @@ Design:
 """
 
 import atexit
+import base64
 import os
 import subprocess
 import sys
@@ -30,9 +33,65 @@ SERVER_DIR = os.path.dirname(os.path.abspath(__file__))
 _bridge_proc: subprocess.Popen | None = None
 
 
-def _per_user_port(user_id: str) -> int:
-    """Deterministic loopback port in 20000-29999 from the user id."""
-    return 20000 + (zlib.crc32(user_id.encode()) % 10000)
+_SAFE_SEGMENT_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_")
+_ENCODED_PREFIX = "b~"
+
+
+def _path_segment(value: str) -> str:
+    """Map an identity to a filesystem-safe path segment, without collisions.
+
+    This used to replace every unsafe character with "_", which is not
+    injective: "adam@x.com" and "adam.x.com" both became "adam_x_com", so two
+    users would silently share one WhatsApp account. Ids are only hex today
+    (Home Assistant issues them), but auth.userClaim is configurable and may be
+    an email or username.
+
+    Already-safe ids pass through unchanged, so existing store directories keep
+    their names and nothing needs migrating. Anything else is base64url-encoded
+    behind a prefix that a passthrough value cannot start with, since "~" is not
+    in the safe set — so the two namespaces cannot overlap.
+    """
+    if value and not value.startswith(_ENCODED_PREFIX) and all(c in _SAFE_SEGMENT_CHARS for c in value):
+        return value
+
+    encoded = base64.urlsafe_b64encode(value.encode()).decode().rstrip("=")
+    return f"{_ENCODED_PREFIX}{encoded}"
+
+
+def _migrate_pre_profile_store(user_dir: str, store_dir: str) -> None:
+    """Move a pre-profiles store into its profile directory, once.
+
+    Before profiles, a user's session lived directly in store/<user>/. The
+    profile is now a further segment, so without this an existing account lands
+    in an empty directory and the bridge asks to pair a new one.
+
+    Moves rather than special-casing the default profile's path: a permanent
+    exception would mean every future reader has to know the default lives
+    somewhere different from every other profile.
+    """
+    if os.path.isdir(store_dir):
+        return
+
+    # whatsapp.db sitting directly in the user directory is what makes this a
+    # pre-profiles store; its absence means there is nothing to move.
+    if not os.path.isfile(os.path.join(user_dir, "whatsapp.db")):
+        return
+
+    os.makedirs(store_dir, exist_ok=True)
+    for name in os.listdir(user_dir):
+        # Everything belongs to the old single account — including the per-chat
+        # media directories — except the profile directories themselves.
+        if os.path.join(user_dir, name) == store_dir:
+            continue
+
+        os.rename(os.path.join(user_dir, name), os.path.join(store_dir, name))
+
+    print(f"[launcher] migrated pre-profiles store into {store_dir}", file=sys.stderr)
+
+
+def _per_user_port(key: str) -> int:
+    """Deterministic loopback port in 20000-29999 from a per-instance key."""
+    return 20000 + (zlib.crc32(key.encode()) % 10000)
 
 
 def _stop_bridge() -> None:
@@ -66,12 +125,25 @@ def main() -> None:
     global _bridge_proc
 
     user_id = os.environ.get("MCP_USER_ID", "default")
-    safe_user = "".join(c if c.isalnum() or c in "-_" else "_" for c in user_id)
+    # One identity may hold several accounts. The wrapper sets MCP_PROFILE_ID
+    # when a connection is bound to a specific one; without it there is a single
+    # account per user, which is the existing layout.
+    profile_id = os.environ.get("MCP_PROFILE_ID") or ""
     data_root = os.environ.get("DATA_ROOT", "/app/data")
-    store_dir = os.path.join(data_root, "store", safe_user)
+
+    # Separate segments, never one joined string: each is encoded independently
+    # so the boundary between them is a real directory separator rather than a
+    # character that encoding could alter.
+    user_dir = os.path.join(data_root, "store", _path_segment(user_id))
+    store_dir = os.path.join(user_dir, _path_segment(profile_id)) if profile_id else user_dir
+    if profile_id:
+        _migrate_pre_profile_store(user_dir, store_dir)
+
     os.makedirs(store_dir, exist_ok=True)
 
-    port = int(os.environ.get("BRIDGE_PORT") or _per_user_port(user_id))
+    # Derived from the store dir, not the user id: two profiles of one user run
+    # concurrently and would otherwise contend for the same loopback port.
+    port = int(os.environ.get("BRIDGE_PORT") or _per_user_port(store_dir))
     # Ephemeral key for the loopback bridge<->server channel (bridge requires one).
     api_key = os.environ.get("API_KEY") or os.urandom(32).hex()
 
