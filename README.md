@@ -343,6 +343,18 @@ Upstream assumes a single account with a single `store/` directory, and pairing 
 
 These are backed by two new bridge endpoints, `GET /api/qr` and `POST /api/logout`.
 
+**Profiles**
+- The store is keyed on `MCP_PROFILE_ID` as well as `MCP_USER_ID` (`store/<user>/<profile>/`), so one person can link several WhatsApp accounts — for instance a personal one and one belonging to an agent acting on their behalf. Requires mcp-auth-wrapper 2.0+.
+- Upgrading an existing deployment means moving each account's data down one level, once:
+
+  ```sh
+  # In the container, with nothing serving traffic:
+  cd /app/data/store/<user-id>
+  mkdir default && mv whatsapp.db* messages.db* *@* default/
+  ```
+
+  Deliberately manual: doing it automatically means touching live session data on every boot to handle a one-off, and getting it wrong costs someone their linked account.
+
 **Packaging**
 - `Dockerfile.combined` builds a single image where the stdio MCP server supervises its own per-user bridge on a deterministic per-user loopback port and tears it down on exit. Intended to run under a wrapper that spawns one process per authenticated user (e.g. `mcp-auth-wrapper`, which injects `MCP_USER_ID`).
 - A GitHub Actions workflow publishes that combined image to GHCR.
