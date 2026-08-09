@@ -53,8 +53,9 @@ ENV PATH="/opt/venv/bin:$PATH"
 # Reuse the base image's existing non-root `node` user (uid/gid 1000).
 
 # Install mcp-auth-wrapper globally at build time (pinned), so startup needs no
-# npx fetch / network / writable npm cache. 1.3.4 carries the MCP_USER_ID injection.
-RUN npm install -g mcp-auth-wrapper@1.3.4 && npm cache clean --force
+# npx fetch / network / writable npm cache. 2.0.0 adds profiles, so one person
+# can link several WhatsApp accounts (MCP_PROFILE_ID alongside MCP_USER_ID).
+RUN npm install -g mcp-auth-wrapper@2.0.0 && npm cache clean --force
 
 WORKDIR /app
 COPY --from=bridge-builder /app/whatsapp-bridge/whatsapp-bridge /app/whatsapp-bridge/whatsapp-bridge
