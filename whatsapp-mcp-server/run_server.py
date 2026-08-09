@@ -58,6 +58,37 @@ def _path_segment(value: str) -> str:
     return f"{_ENCODED_PREFIX}{encoded}"
 
 
+def _migrate_pre_profile_store(user_dir: str, store_dir: str) -> None:
+    """Move a pre-profiles store into its profile directory, once.
+
+    Before profiles, a user's session lived directly in store/<user>/. The
+    profile is now a further segment, so without this an existing account lands
+    in an empty directory and the bridge asks to pair a new one.
+
+    Moves rather than special-casing the default profile's path: a permanent
+    exception would mean every future reader has to know the default lives
+    somewhere different from every other profile.
+    """
+    if os.path.isdir(store_dir):
+        return
+
+    # whatsapp.db sitting directly in the user directory is what makes this a
+    # pre-profiles store; its absence means there is nothing to move.
+    if not os.path.isfile(os.path.join(user_dir, "whatsapp.db")):
+        return
+
+    os.makedirs(store_dir, exist_ok=True)
+    for name in os.listdir(user_dir):
+        # Everything belongs to the old single account — including the per-chat
+        # media directories — except the profile directories themselves.
+        if os.path.join(user_dir, name) == store_dir:
+            continue
+
+        os.rename(os.path.join(user_dir, name), os.path.join(store_dir, name))
+
+    print(f"[launcher] migrated pre-profiles store into {store_dir}", file=sys.stderr)
+
+
 def _per_user_port(key: str) -> int:
     """Deterministic loopback port in 20000-29999 from a per-instance key."""
     return 20000 + (zlib.crc32(key.encode()) % 10000)
@@ -103,9 +134,10 @@ def main() -> None:
     # Separate segments, never one joined string: each is encoded independently
     # so the boundary between them is a real directory separator rather than a
     # character that encoding could alter.
-    store_dir = os.path.join(data_root, "store", _path_segment(user_id))
+    user_dir = os.path.join(data_root, "store", _path_segment(user_id))
+    store_dir = os.path.join(user_dir, _path_segment(profile_id)) if profile_id else user_dir
     if profile_id:
-        store_dir = os.path.join(store_dir, _path_segment(profile_id))
+        _migrate_pre_profile_store(user_dir, store_dir)
 
     os.makedirs(store_dir, exist_ok=True)
 

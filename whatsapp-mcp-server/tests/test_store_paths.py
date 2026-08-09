@@ -74,3 +74,58 @@ def test_distinct_inputs_stay_distinct():
 def test_empty_id_still_produces_a_segment():
     # Must not return "", which would collapse into the parent directory.
     assert _path_segment("") not in ("", ".", "..")
+
+
+def _make_pre_profiles_store(user_dir: str) -> None:
+    """A store as it looked before profiles: dbs and per-chat media directories."""
+    os.makedirs(user_dir, exist_ok=True)
+    for name in ("whatsapp.db", "messages.db", "whatsapp.db-wal"):
+        with open(os.path.join(user_dir, name), "w") as f:
+            f.write(name)
+
+    os.makedirs(os.path.join(user_dir, "12345@g.us"), exist_ok=True)
+    with open(os.path.join(user_dir, "12345@g.us", "pic.jpg"), "w") as f:
+        f.write("media")
+
+
+def test_an_existing_session_is_moved_into_its_profile(tmp_path):
+    """Otherwise the bridge finds an empty directory and asks to pair again.
+
+    That is exactly what happened deploying this: every account has a default
+    profile, so the new path segment orphaned the existing session.
+    """
+    user_dir = os.path.join(str(tmp_path), "77f00f25")
+    _make_pre_profiles_store(user_dir)
+    store_dir = os.path.join(user_dir, "default")
+
+    run_server._migrate_pre_profile_store(user_dir, store_dir)
+
+    assert os.path.isfile(os.path.join(store_dir, "whatsapp.db"))
+    # Media moves too — it is the same account's data.
+    assert os.path.isfile(os.path.join(store_dir, "12345@g.us", "pic.jpg"))
+    assert not os.path.exists(os.path.join(user_dir, "whatsapp.db"))
+
+
+def test_migration_does_not_run_twice(tmp_path):
+    user_dir = os.path.join(str(tmp_path), "77f00f25")
+    _make_pre_profiles_store(user_dir)
+    store_dir = os.path.join(user_dir, "default")
+
+    run_server._migrate_pre_profile_store(user_dir, store_dir)
+    # A second profile must not swallow the first one's data.
+    other = os.path.join(user_dir, "pab12")
+    run_server._migrate_pre_profile_store(user_dir, other)
+
+    assert os.path.isfile(os.path.join(store_dir, "whatsapp.db"))
+    assert not os.path.exists(other)
+
+
+def test_nothing_happens_without_a_pre_profiles_store(tmp_path):
+    user_dir = os.path.join(str(tmp_path), "fresh")
+    os.makedirs(user_dir, exist_ok=True)
+    store_dir = os.path.join(user_dir, "default")
+
+    run_server._migrate_pre_profile_store(user_dir, store_dir)
+
+    # A new user starts clean rather than getting an empty profile directory.
+    assert not os.path.exists(store_dir)
