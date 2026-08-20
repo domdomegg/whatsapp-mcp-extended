@@ -76,8 +76,22 @@ func (s *Server) Start() {
 	serverAddr := fmt.Sprintf("%s:%d", s.bindHost, s.port)
 	fmt.Printf("Starting REST API server on %s...\n", serverAddr)
 
+	// Bind before backgrounding, so a failure to acquire the port is fatal
+	// rather than logged and ignored. A bridge that cannot own its port is
+	// unreachable by the MCP server, but still connects to WhatsApp — and that
+	// connection evicts the previous bridge's device session, which *was*
+	// serving the port. Carrying on would therefore leave the port dead with no
+	// bridge behind it and nothing to notice: the process stays up, so the
+	// container looks healthy while WhatsApp silently stops working. Exiting
+	// instead lets the supervisor respawn us cleanly.
+	ln, err := net.Listen("tcp", serverAddr)
+	if err != nil {
+		fmt.Printf("REST API server error: failed to listen on %s: %v\n", serverAddr, err)
+		os.Exit(1)
+	}
+
 	go func() {
-		if err := http.ListenAndServe(serverAddr, nil); err != nil {
+		if err := http.Serve(ln, nil); err != nil {
 			fmt.Printf("REST API server error: %v\n", err)
 		}
 	}()
