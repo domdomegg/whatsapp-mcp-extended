@@ -1,3 +1,8 @@
+// whatsapp-mcp: one WhatsApp account as an MCP server over stdio.
+//
+// mcp-auth-wrapper spawns one of these per user profile with MCP_USER_ID and
+// MCP_PROFILE_ID set; state lives under DATA_ROOT/store/<user>/<profile>.
+// `whatsapp-mcp healthcheck` is the container's liveness probe.
 package main
 
 import (
@@ -12,14 +17,146 @@ import (
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
-	"whatsapp-bridge/internal/antiban"
-	"whatsapp-bridge/internal/api"
+
 	"whatsapp-bridge/internal/config"
 	"whatsapp-bridge/internal/database"
-	localTypes "whatsapp-bridge/internal/types"
-	"whatsapp-bridge/internal/webhook"
+	"whatsapp-bridge/internal/health"
+	mcpserver "whatsapp-bridge/internal/mcp"
 	"whatsapp-bridge/internal/whatsapp"
 )
+
+const (
+	presencePingInterval = 20 * time.Minute // below ~25m risks bot fingerprinting; keeps the session warm
+	watchdogLimit        = 3 * time.Minute  // disconnected this long: exit, the wrapper respawns on demand
+)
+
+func main() {
+	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
+		os.Exit(healthcheck())
+	}
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, "fatal:", err)
+		os.Exit(1)
+	}
+}
+
+// healthcheck is the exec liveness probe: non-zero when a linked account in
+// this container has been disconnected for too long or a process has hung.
+func healthcheck() int {
+	root := os.Getenv("DATA_ROOT")
+	if root == "" {
+		root = "/app/data"
+	}
+	problems := health.Check(root, time.Now(), health.Alive)
+	for _, p := range problems {
+		fmt.Fprintln(os.Stderr, "[healthcheck]", p)
+	}
+	if len(problems) > 0 {
+		return 1
+	}
+	return 0
+}
+
+func run() error {
+	logger := newLogger("whatsapp", os.Getenv("DEBUG") == "true")
+	storeDir := config.StoreDir()
+	if err := os.MkdirAll(storeDir, 0o755); err != nil {
+		return fmt.Errorf("create store directory %s: %w", storeDir, err)
+	}
+	logger.Infof("store %s", storeDir)
+
+	messageStore, err := database.NewMessageStore()
+	if err != nil {
+		return fmt.Errorf("open message store: %w", err)
+	}
+	defer messageStore.Close()
+
+	client, err := whatsapp.NewClient(logger)
+	if err != nil {
+		return fmt.Errorf("create WhatsApp client: %w", err)
+	}
+
+	// whatsmeow has created whatsapp.db by now; open it read-only for contacts.
+	contacts, err := database.OpenContactStore()
+	if err != nil {
+		return fmt.Errorf("open contact store: %w", err)
+	}
+	defer contacts.Close()
+
+	client.AddEventHandler(eventHandler(client, messageStore, logger))
+
+	// Connect in the background: the MCP server must answer initialize at once,
+	// and a not-yet-linked account needs the QR tools to be reachable.
+	go func() {
+		if err := client.Connect(); err != nil {
+			logger.Errorf("connect: %v", err)
+		}
+	}()
+
+	go watchdog(client, logger)
+	go presencePing(client, logger)
+	go writeHealth(client, storeDir, logger)
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	server := mcpserver.New(client, messageStore, contacts, config.MediaDir())
+	err = server.Run(ctx)
+
+	logger.Infof("shutting down")
+	client.Disconnect()
+	return err
+}
+
+// watchdog exits the process when WhatsApp has been gone for watchdogLimit.
+// With one process per account that is the whole recovery story: the wrapper's
+// stdio session ends and the next tool call starts a fresh process.
+func watchdog(client *whatsapp.Client, logger waLog.Logger) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		_, _, discAt, _ := client.ConnectionState()
+		if !discAt.IsZero() && time.Since(discAt) > watchdogLimit {
+			logger.Errorf("WATCHDOG: disconnected for %v, exiting", time.Since(discAt).Round(time.Second))
+			os.Exit(1)
+		}
+	}
+}
+
+func presencePing(client *whatsapp.Client, logger waLog.Logger) {
+	ticker := time.NewTicker(presencePingInterval)
+	defer ticker.Stop()
+	for range ticker.C {
+		if client.IsConnected() {
+			if err := client.SetPresence("available"); err != nil {
+				logger.Debugf("presence ping failed: %v", err)
+			}
+		}
+	}
+}
+
+func writeHealth(client *whatsapp.Client, storeDir string, logger waLog.Logger) {
+	write := func() {
+		_, _, discAt, _ := client.ConnectionState()
+		var disconnectedFor int64
+		if !discAt.IsZero() {
+			disconnectedFor = int64(time.Since(discAt).Seconds())
+		}
+		err := health.Write(storeDir, health.Status{
+			PID: os.Getpid(), Connected: client.IsConnected(), NeedsPairing: client.Store.ID == nil,
+			DisconnectedForSeconds: disconnectedFor,
+		})
+		if err != nil {
+			logger.Warnf("write health file: %v", err)
+		}
+	}
+	write()
+	ticker := time.NewTicker(health.WriteInterval)
+	defer ticker.Stop()
+	for range ticker.C {
+		write()
+	}
+}
 
 // activeCall tracks an ongoing call for duration/status calculation.
 type activeCall struct {
@@ -29,11 +166,6 @@ type activeCall struct {
 	Timestamp time.Time
 	IsFromMe  bool
 }
-
-var (
-	activeCalls   = make(map[string]*activeCall)
-	activeCallsMu sync.Mutex
-)
 
 // formatDuration formats a duration as "M:SS".
 func formatDuration(d time.Duration) string {
@@ -49,7 +181,6 @@ func resolveCallJID(client *whatsapp.Client, logger waLog.Logger, jid types.JID)
 	if jid.Server == types.HiddenUserServer {
 		resolved, err := client.Store.GetAltJID(context.Background(), jid)
 		if err == nil && !resolved.IsEmpty() {
-			logger.Debugf("[CALL] Resolved LID %s → %s", jid, resolved)
 			return resolved
 		}
 		logger.Warnf("[CALL] Could not resolve LID %s: %v", jid, err)
@@ -58,172 +189,110 @@ func resolveCallJID(client *whatsapp.Client, logger waLog.Logger, jid types.JID)
 }
 
 // isCallFromMe checks if a call originated from this device.
-func isCallFromMe(client *whatsapp.Client, from types.JID, resolvedFrom types.JID, callCreator types.JID) bool {
+func isCallFromMe(client *whatsapp.Client, from, resolvedFrom, callCreator types.JID) bool {
 	if client.Store.ID == nil {
 		return false
 	}
-	ownUser := client.Store.ID.ToNonAD().User
-	if from.User == ownUser || resolvedFrom.User == ownUser {
-		return true
-	}
-	if !callCreator.IsEmpty() && callCreator.User == ownUser {
-		return true
-	}
-	return false
+	own := client.Store.ID.ToNonAD().User
+	return from.User == own || resolvedFrom.User == own || (!callCreator.IsEmpty() && callCreator.User == own)
 }
 
-// fireConnectionEvent broadcasts a connection state change to all configured webhooks.
-func fireConnectionEvent(wm *webhook.Manager, client *whatsapp.Client, eventType, reason string) {
-	jid := ""
-	if client.Store.ID != nil {
-		jid = client.Store.ID.String()
-	}
-	wm.DeliverConnectionEvent(&localTypes.ConnectionEventPayload{
-		EventType:    eventType,
-		Timestamp:    time.Now().UTC().Format(time.RFC3339),
-		JID:          jid,
-		NeedsPairing: client.Store.ID == nil,
-		Reason:       reason,
-	})
-}
+// eventHandler stores messages, history and calls, and keeps the connection
+// state the watchdog and health file read.
+func eventHandler(client *whatsapp.Client, messageStore *database.MessageStore, logger waLog.Logger) func(any) {
+	activeCalls := map[string]*activeCall{}
+	var mu sync.Mutex
 
-func main() {
-	// Set up logger
-	logger := waLog.Stdout("Client", "INFO", true)
-	logger.Infof("Starting WhatsApp client...")
-
-	// Security: Require API_KEY in production
-	apiKey := os.Getenv("API_KEY")
-	if apiKey == "" {
-		if os.Getenv("DISABLE_AUTH_CHECK") != "true" {
-			logger.Errorf("SECURITY: API_KEY environment variable is required")
-			logger.Errorf("Set API_KEY or DISABLE_AUTH_CHECK=true for development")
-			os.Exit(1)
+	startCall := func(callID string, from, groupJID types.JID, creator types.JID, ts time.Time, media string) {
+		resolved := resolveCallJID(client, logger, from)
+		callFrom := resolved.User
+		fromMe := isCallFromMe(client, from, resolved, creator)
+		chatJID, chatResolved := resolved.String(), resolved
+		if !groupJID.IsEmpty() {
+			chatJID, chatResolved = groupJID.String(), groupJID
 		}
-		logger.Warnf("WARNING: Running without API authentication (DISABLE_AUTH_CHECK=true)")
-	} else {
-		logger.Infof("API authentication enabled")
+		name := client.GetChatName(messageStore, chatResolved, chatJID, nil, callFrom)
+		kind := "call"
+		if media != "" {
+			kind = media + " call"
+		}
+		content := fmt.Sprintf("📞 Incoming %s from %s", kind, name)
+		if fromMe {
+			content = fmt.Sprintf("📞 Outgoing %s to %s", kind, name)
+		}
+		mu.Lock()
+		activeCalls[callID] = &activeCall{ChatJID: chatJID, Sender: callFrom, Name: name, Timestamp: ts, IsFromMe: fromMe}
+		mu.Unlock()
+		if err := messageStore.StoreChat(chatJID, name, ts); err != nil {
+			logger.Warnf("store chat for call: %v", err)
+		}
+		if err := messageStore.StoreMessage("call-"+callID, chatJID, callFrom, name, content, ts, fromMe, "call", "", "", "", nil, nil, nil, 0); err != nil {
+			logger.Warnf("store call message: %v", err)
+		}
+	}
+	endCall := func(callID string, ts time.Time, missed bool) {
+		mu.Lock()
+		call, ok := activeCalls[callID]
+		delete(activeCalls, callID)
+		mu.Unlock()
+		if !ok {
+			return
+		}
+		content := fmt.Sprintf("📞 Missed call from %s", call.Name)
+		if !missed {
+			content = fmt.Sprintf("📞 Call with %s (%s)", call.Name, formatDuration(ts.Sub(call.Timestamp)))
+		}
+		if err := messageStore.StoreMessage("call-"+callID, call.ChatJID, call.Sender, call.Name, content, call.Timestamp, call.IsFromMe, "call", "", "", "", nil, nil, nil, 0); err != nil {
+			logger.Warnf("update call message: %v", err)
+		}
 	}
 
-	// Load configuration
-	cfg := config.NewConfig()
+	go func() { // forget calls that never got a terminate event
+		for range time.Tick(time.Minute) {
+			cutoff := time.Now().Add(-5 * time.Minute)
+			mu.Lock()
+			for id, call := range activeCalls {
+				if call.Timestamp.Before(cutoff) {
+					delete(activeCalls, id)
+				}
+			}
+			mu.Unlock()
+		}
+	}()
 
-	// Initialize database
-	messageStore, err := database.NewMessageStore()
-	if err != nil {
-		logger.Errorf("Failed to initialize message store: %v", err)
-		os.Exit(1)
-	}
-	defer messageStore.Close()
-
-	// Create WhatsApp client with config (Phase 4: HistorySyncConfig)
-	client, err := whatsapp.NewClientWithConfig(logger, cfg)
-	if err != nil {
-		logger.Errorf("Failed to create WhatsApp client: %v", err)
-		os.Exit(1)
-	}
-
-	// Initialize webhook manager
-	webhookManager := webhook.NewManager(messageStore, logger)
-	err = webhookManager.LoadWebhookConfigs()
-	if err != nil {
-		logger.Errorf("Failed to load webhook configs: %v", err)
-		os.Exit(1)
-	}
-
-	// Fire a connection webhook just before AutoReconnect gives up, so external monitors
-	// get an out-of-band alert before the watchdog exits the process.
-	client.SetCircuitBreakerCallback(func() {
-		fireConnectionEvent(webhookManager, client, "circuit_breaker_exhausted", "30 consecutive reconnect failures")
-	})
-
-	// Setup event handling for messages and history sync
-	client.AddEventHandler(func(evt interface{}) {
+	return func(evt any) {
 		switch v := evt.(type) {
 		case *events.Message:
-			// Process regular messages with webhook support
-			client.HandleMessage(messageStore, webhookManager, v)
+			client.HandleMessage(messageStore, v)
 
 		case *events.HistorySync:
-			// Process history sync events with detailed logging
-			logger.Infof("[SYNC] Starting HistorySync (Type: %v, Conversations: %d)", v.Data.SyncType, len(v.Data.Conversations))
+			logger.Infof("[SYNC] history sync (type %v, %d conversations)", v.Data.SyncType, len(v.Data.Conversations))
 			client.HandleHistorySync(messageStore, v)
-			logger.Infof("[SYNC] ✓ Completed (Type: %v, %d conversations)", v.Data.SyncType, len(v.Data.Conversations))
 
 		case *events.Connected:
 			_, _, discAt, _ := client.ConnectionState()
 			client.MarkConnected()
-			client.Antiban().RecordEvent(antiban.EventConnected)
 			if err := client.SetPresence("available"); err != nil {
-				logger.Warnf("Failed to set presence: %v", err)
-			} else {
-				logger.Infof("✓ Presence set to available")
+				logger.Warnf("set presence: %v", err)
 			}
 			logger.Infof("✓ Connected to WhatsApp")
-			go fireConnectionEvent(webhookManager, client, "connected", "")
-
-			// If we were disconnected for >30s, attempt best-effort history backfill
-			// for recently active chats to recover any messages missed during the gap.
-			if !discAt.IsZero() {
-				gap := time.Since(discAt)
-				if gap > 30*time.Second {
-					logger.Warnf("[RECONNECT] Gap detected: offline for %v — attempting history backfill", gap.Round(time.Second))
-					go func() {
-						time.Sleep(5 * time.Second) // let WA session stabilise first
-						chats, err := messageStore.GetChats()
-						if err != nil {
-							logger.Warnf("[RECONNECT] Failed to get chats for backfill: %v", err)
-							return
-						}
-						cutoff := time.Now().Add(-24 * time.Hour)
-						requested := 0
-						for chatJID, lastMsgTime := range chats {
-							if lastMsgTime.Before(cutoff) {
-								continue // skip inactive chats
-							}
-							msgs, err := messageStore.GetMessages(chatJID, 1)
-							if err != nil || len(msgs) == 0 {
-								continue
-							}
-							newest := msgs[0]
-							err = client.RequestChatHistory(chatJID, newest.ID, newest.IsFromMe, newest.Sender, newest.Time.UnixMilli(), 50)
-							if err != nil {
-								logger.Warnf("[RECONNECT] History request failed for %s: %v", chatJID, err)
-							} else {
-								logger.Infof("[RECONNECT] History requested for %s (last active: %v)", chatJID, lastMsgTime.Format("15:04:05"))
-								requested++
-							}
-							time.Sleep(500 * time.Millisecond) // avoid rate limiting
-						}
-						logger.Infof("[RECONNECT] Backfill requested for %d active chats", requested)
-					}()
-				}
+			if !discAt.IsZero() && time.Since(discAt) > 30*time.Second {
+				go backfillAfterGap(client, messageStore, logger, time.Since(discAt))
 			}
 
 		case *events.LoggedOut:
-			client.Antiban().RecordEvent(antiban.EventLoggedOut)
-			logger.Warnf("✗ Device logged out - credentials wiped, re-pairing required (open http://localhost:8090)")
-			// MarkDisconnected so the watchdog triggers and Docker restarts the container,
-			// which will display a fresh QR / pairing code.
+			logger.Warnf("✗ Device logged out — credentials wiped, call get_setup_qr to re-link")
 			client.MarkDisconnected()
-			go fireConnectionEvent(webhookManager, client, "logged_out", "session revoked by WhatsApp server")
 
 		case *events.PairSuccess:
-			logger.Infof("✓ Phone pairing successful!")
+			logger.Infof("✓ Phone pairing successful")
 			client.HandlePairingSuccess()
-			go fireConnectionEvent(webhookManager, client, "pair_success", "")
 
 		case *events.PairError:
 			logger.Errorf("✗ Phone pairing failed: %v", v.Error)
 			client.HandlePairingError(v.Error)
-			errMsg := ""
-			if v.Error != nil {
-				errMsg = v.Error.Error()
-			}
-			go fireConnectionEvent(webhookManager, client, "pair_error", errMsg)
 
 		case *events.KeepAliveTimeout:
-			client.Antiban().RecordEvent(antiban.EventKeepAliveTimeout)
 			logger.Warnf("⚠ KeepAlive timeout (errors: %d)", v.ErrorCount)
 			if v.ErrorCount >= 3 {
 				logger.Errorf("KeepAlive: %d consecutive failures, forcing disconnect+reconnect", v.ErrorCount)
@@ -231,236 +300,72 @@ func main() {
 				go func() {
 					time.Sleep(2 * time.Second)
 					if err := client.Client.Connect(); err != nil {
-						logger.Errorf("Reconnect after KeepAlive failure: %v", err)
+						logger.Errorf("reconnect after KeepAlive failure: %v", err)
 					}
 				}()
 			}
 
 		case *events.KeepAliveRestored:
-			logger.Infof("✓ KeepAlive restored after timeout")
+			logger.Infof("✓ KeepAlive restored")
 
 		case *events.StreamReplaced:
-			// Another process has taken over this session (e.g. duplicate docker-compose up).
-			// Exit immediately — two processes sharing one WhatsApp session causes split-brain.
+			// Another process took this session; two of them would split-brain.
 			logger.Errorf("✗ Stream replaced — another process took this session, exiting")
 			client.MarkDisconnected()
 			os.Exit(1)
 
 		case *events.StreamError:
-			client.Antiban().RecordEvent(antiban.EventStreamError)
 			logger.Errorf("✗ Stream error: %v", v.Code)
 
 		case *events.Disconnected:
 			client.MarkDisconnected()
-			client.Antiban().RecordEvent(antiban.EventDisconnected)
-			logger.Warnf("⚠ Disconnected from WhatsApp - attempting reconnect")
-			go fireConnectionEvent(webhookManager, client, "disconnected", "")
+			logger.Warnf("⚠ Disconnected from WhatsApp — reconnecting")
 
 		case *events.CallOffer:
-			resolvedJID := resolveCallJID(client, logger, v.From)
-			callFrom := resolvedJID.User
-			fromMe := isCallFromMe(client, v.From, resolvedJID, v.CallCreator)
-			var chatJID string
-			var chatResolvedJID types.JID
-			if !v.GroupJID.IsEmpty() {
-				chatJID = v.GroupJID.String()
-				chatResolvedJID = v.GroupJID
-			} else {
-				chatJID = resolvedJID.String()
-				chatResolvedJID = resolvedJID
-			}
-			logger.Infof("[CALL] CallOffer from %s (CallID: %s, isFromMe: %v)", callFrom, v.CallID, fromMe)
-			name := client.GetChatName(messageStore, chatResolvedJID, chatJID, nil, callFrom)
-			var content string
-			if fromMe {
-				content = fmt.Sprintf("📞 Outgoing call to %s", name)
-			} else {
-				content = fmt.Sprintf("📞 Incoming call from %s", name)
-			}
-			activeCallsMu.Lock()
-			activeCalls[v.CallID] = &activeCall{ChatJID: chatJID, Sender: callFrom, Name: name, Timestamp: v.Timestamp, IsFromMe: fromMe}
-			activeCallsMu.Unlock()
-			if err := messageStore.StoreChat(chatJID, name, v.Timestamp); err != nil {
-				logger.Warnf("Failed to store chat for call: %v", err)
-			}
-			if err := messageStore.StoreMessage("call-"+v.CallID, chatJID, callFrom, name, content, v.Timestamp, fromMe, "call", "", "", "", nil, nil, nil, 0); err != nil {
-				logger.Warnf("Failed to store call message: %v", err)
-			}
-
+			startCall(v.CallID, v.From, v.GroupJID, v.CallCreator, v.Timestamp, "")
 		case *events.CallOfferNotice:
-			resolvedJID := resolveCallJID(client, logger, v.From)
-			callFrom := resolvedJID.User
-			fromMe := isCallFromMe(client, v.From, resolvedJID, v.CallCreator)
-			var chatJID string
-			var chatResolvedJID types.JID
-			if !v.GroupJID.IsEmpty() {
-				chatJID = v.GroupJID.String()
-				chatResolvedJID = v.GroupJID
-			} else {
-				chatJID = resolvedJID.String()
-				chatResolvedJID = resolvedJID
-			}
-			logger.Infof("[CALL] CallOfferNotice from %s (CallID: %s, Media: %s)", callFrom, v.CallID, v.Media)
-			name := client.GetChatName(messageStore, chatResolvedJID, chatJID, nil, callFrom)
-			var content string
-			if fromMe {
-				content = fmt.Sprintf("📞 Outgoing %s call to %s", v.Media, name)
-			} else {
-				content = fmt.Sprintf("📞 Incoming %s call from %s", v.Media, name)
-			}
-			activeCallsMu.Lock()
-			activeCalls[v.CallID] = &activeCall{ChatJID: chatJID, Sender: callFrom, Name: name, Timestamp: v.Timestamp, IsFromMe: fromMe}
-			activeCallsMu.Unlock()
-			if err := messageStore.StoreChat(chatJID, name, v.Timestamp); err != nil {
-				logger.Warnf("Failed to store chat for group call: %v", err)
-			}
-			if err := messageStore.StoreMessage("call-"+v.CallID, chatJID, callFrom, name, content, v.Timestamp, fromMe, "call", "", "", "", nil, nil, nil, 0); err != nil {
-				logger.Warnf("Failed to store group call message: %v", err)
-			}
-
+			startCall(v.CallID, v.From, v.GroupJID, v.CallCreator, v.Timestamp, v.Media)
 		case *events.CallAccept:
-			resolvedJID := resolveCallJID(client, logger, v.From)
-			logger.Infof("[CALL] CallAccept from %s (CallID: %s)", resolvedJID.User, v.CallID)
-			activeCallsMu.Lock()
-			if call, exists := activeCalls[v.CallID]; exists {
+			mu.Lock()
+			if call, ok := activeCalls[v.CallID]; ok {
 				call.Timestamp = v.Timestamp
 			}
-			activeCallsMu.Unlock()
-
+			mu.Unlock()
 		case *events.CallTerminate:
-			resolvedJID := resolveCallJID(client, logger, v.From)
-			logger.Infof("[CALL] CallTerminate from %s (CallID: %s, Reason: %s)", resolvedJID.User, v.CallID, v.Reason)
-			activeCallsMu.Lock()
-			call, exists := activeCalls[v.CallID]
-			if exists {
-				delete(activeCalls, v.CallID)
-			}
-			activeCallsMu.Unlock()
-			if exists {
-				duration := v.Timestamp.Sub(call.Timestamp)
-				var content string
-				switch v.Reason {
-				case "timeout", "busy":
-					content = fmt.Sprintf("📞 Missed call from %s", call.Name)
-				default:
-					content = fmt.Sprintf("📞 Call with %s (%s)", call.Name, formatDuration(duration))
-				}
-				if err := messageStore.StoreMessage("call-"+v.CallID, call.ChatJID, call.Sender, call.Name, content, call.Timestamp, call.IsFromMe, "call", "", "", "", nil, nil, nil, 0); err != nil {
-					logger.Warnf("Failed to update call message: %v", err)
-				}
-			}
-
+			endCall(v.CallID, v.Timestamp, v.Reason == "timeout" || v.Reason == "busy")
 		case *events.CallReject:
-			resolvedJID := resolveCallJID(client, logger, v.From)
-			logger.Infof("[CALL] CallReject from %s (CallID: %s)", resolvedJID.User, v.CallID)
-			activeCallsMu.Lock()
-			call, exists := activeCalls[v.CallID]
-			if exists {
-				delete(activeCalls, v.CallID)
-			}
-			activeCallsMu.Unlock()
-			if exists {
-				content := fmt.Sprintf("📞 Missed call from %s", call.Name)
-				if err := messageStore.StoreMessage("call-"+v.CallID, call.ChatJID, call.Sender, call.Name, content, call.Timestamp, call.IsFromMe, "call", "", "", "", nil, nil, nil, 0); err != nil {
-					logger.Warnf("Failed to update rejected call message: %v", err)
-				}
-			}
+			endCall(v.CallID, v.Timestamp, true)
 		}
-	})
-
-	// Connection watchdog: exit process if disconnected >3 min (forces container restart)
-	go func() {
-		ticker := time.NewTicker(30 * time.Second)
-		defer ticker.Stop()
-		for range ticker.C {
-			_, _, discAt, _ := client.ConnectionState()
-			if !discAt.IsZero() && time.Since(discAt) > 3*time.Minute {
-				logger.Errorf("WATCHDOG: disconnected for %v, exiting to force container restart", time.Since(discAt).Round(time.Second))
-				os.Exit(1)
-			}
-		}
-	}()
-
-	// Stale call cleanup: remove calls older than 5 minutes without terminate event
-	go func() {
-		ticker := time.NewTicker(1 * time.Minute)
-		defer ticker.Stop()
-		for range ticker.C {
-			cutoff := time.Now().Add(-5 * time.Minute)
-			activeCallsMu.Lock()
-			for id, call := range activeCalls {
-				if call.Timestamp.Before(cutoff) {
-					delete(activeCalls, id)
-					logger.Debugf("[CALL] Cleaned up stale call %s", id)
-				}
-			}
-			activeCallsMu.Unlock()
-		}
-	}()
-
-	// Periodic presence ping to keep the WhatsApp session active.
-	// Controlled by PRESENCE_PING_ENABLED and PRESENCE_PING_INTERVAL env vars.
-	// Default: enabled, every 20 minutes. Disable if you don't want to appear online to contacts.
-	if cfg.PresencePingEnabled {
-		go func() {
-			ticker := time.NewTicker(cfg.PresencePingInterval)
-			defer ticker.Stop()
-			for range ticker.C {
-				if client.IsConnected() {
-					if err := client.SetPresence("available"); err != nil {
-						logger.Debugf("Presence ping failed: %v", err)
-					} else {
-						logger.Debugf("Presence ping sent (interval: %v)", cfg.PresencePingInterval)
-					}
-				}
-			}
-		}()
-	} else {
-		logger.Infof("Presence ping disabled (PRESENCE_PING_ENABLED=false)")
 	}
+}
 
-	// Start REST API server with webhook support (BEFORE connecting to avoid blocking)
-	server := api.NewServer(client, messageStore, webhookManager, cfg.APIPort, cfg.APIBindHost)
-	server.Start()
-	fmt.Println("✓ REST API server started on port " + fmt.Sprintf("%d", cfg.APIPort))
-
-	// Connect to WhatsApp in background (non-blocking so server can start)
-	go func() {
-		if err := client.Connect(); err != nil {
-			logger.Errorf("Failed to connect to WhatsApp: %v", err)
+// backfillAfterGap asks the phone for recent history of chats active in the
+// last day, to recover messages missed while disconnected.
+func backfillAfterGap(client *whatsapp.Client, messageStore *database.MessageStore, logger waLog.Logger, gap time.Duration) {
+	logger.Warnf("[RECONNECT] offline for %v — requesting history backfill", gap.Round(time.Second))
+	time.Sleep(5 * time.Second) // let the session settle first
+	chats, err := messageStore.GetChats()
+	if err != nil {
+		logger.Warnf("[RECONNECT] list chats: %v", err)
+		return
+	}
+	cutoff := time.Now().Add(-24 * time.Hour)
+	requested := 0
+	for chatJID, lastMsgTime := range chats {
+		if lastMsgTime.Before(cutoff) {
+			continue
+		}
+		msgs, err := messageStore.GetMessages(chatJID, 1)
+		if err != nil || len(msgs) == 0 {
+			continue
+		}
+		newest := msgs[0]
+		if err := client.RequestChatHistory(chatJID, newest.ID, newest.IsFromMe, newest.Sender, newest.Time.UnixMilli(), 50); err != nil {
+			logger.Warnf("[RECONNECT] history request for %s: %v", chatJID, err)
 		} else {
-			fmt.Println("\n✓ Connected to WhatsApp!")
+			requested++
 		}
-	}()
-
-	// Create a channel to keep the main goroutine alive
-	exitChan := make(chan os.Signal, 1)
-	signal.Notify(exitChan, syscall.SIGINT, syscall.SIGTERM)
-
-	fmt.Println("REST server is running. Press Ctrl+C to disconnect and exit.")
-	fmt.Println("=" + fmt.Sprintf("%150s", ""))
-	fmt.Println("Monitor sync progress:")
-	fmt.Println("  curl -H 'X-API-Key: " + apiKey + "' http://localhost:" + fmt.Sprintf("%d", cfg.APIPort) + "/api/sync-status")
-	fmt.Println("=" + fmt.Sprintf("%150s", ""))
-
-	// Periodically log sync stats
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-
-	go func() {
-		for range ticker.C {
-			logger.Debugf("[STATS] Connected: %v, JID: %v", client.IsConnected(), client.Store.ID)
-		}
-	}()
-
-	// Wait for termination signal
-	<-exitChan
-
-	fmt.Println("Disconnecting...")
-	// Flush antiban state before disconnect
-	if err := client.Antiban().Close(); err != nil {
-		logger.Warnf("Antiban close error: %v", err)
+		time.Sleep(500 * time.Millisecond)
 	}
-	// Disconnect client
-	client.Disconnect()
+	logger.Infof("[RECONNECT] backfill requested for %d active chats", requested)
 }

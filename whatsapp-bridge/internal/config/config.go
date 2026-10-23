@@ -1,91 +1,72 @@
+// Package config resolves where this account's state lives. There is one
+// deployment shape — mcp-auth-wrapper spawns one process per user profile with
+// MCP_USER_ID and MCP_PROFILE_ID in the environment — so there are no knobs
+// beyond the two paths.
 package config
 
 import (
+	"encoding/base64"
 	"os"
-	"strconv"
-	"time"
+	"path/filepath"
+	"strings"
 )
 
-// Config holds application configuration
-type Config struct {
-	APIPort     int
-	APIBindHost string // API_BIND_HOST: default 127.0.0.1 (safe for local dev); set 0.0.0.0 in Docker
+// History sync limits requested from the phone on first link. Fixed: they only
+// matter once, and the old env overrides were never used.
+const (
+	HistorySyncDaysLimit uint32 = 365
+	HistorySyncSizeMB    uint32 = 5000
+	StorageQuotaMB       uint32 = 10240
+)
 
-	// History sync configuration (Phase 4)
-	HistorySyncDaysLimit uint32 // HISTORY_SYNC_DAYS_LIMIT env var
-	HistorySyncSizeMB    uint32 // HISTORY_SYNC_SIZE_MB env var
-	StorageQuotaMB       uint32 // STORAGE_QUOTA_MB env var
+const encodedPrefix = "b~"
 
-	// Presence ping configuration
-	// PRESENCE_PING_ENABLED=false disables presence broadcasts to contacts (default true)
-	// PRESENCE_PING_INTERVAL sets how often to ping (default 20m; reduce below 25m risks bot fingerprinting)
-	PresencePingEnabled  bool
-	PresencePingInterval time.Duration
+// pathSegment maps an identity to a filesystem-safe directory name without
+// collisions. Safe ids pass through unchanged (so existing store directories
+// keep their names); anything else is base64url behind a prefix that a safe id
+// cannot start with, because "~" is not in the safe set. Same scheme as the
+// previous Python launcher, so stores created by it are found.
+func pathSegment(value string) string {
+	safe := value != "" && !strings.HasPrefix(value, encodedPrefix)
+	for _, c := range value {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_') {
+			safe = false
+			break
+		}
+	}
+	if safe {
+		return value
+	}
+	return encodedPrefix + strings.TrimRight(base64.URLEncoding.EncodeToString([]byte(value)), "=")
 }
 
-// StoreDir returns the directory used for the bridge's data (databases, media,
-// anti-ban state). It is configured via the STORE_DIR environment variable and
-// defaults to "store". Distinct values allow multiple per-user bridge instances
-// to use separate directories (e.g. "store/<userid>").
+// StoreDir is where this account's whatsapp.db, messages.db and media live:
+// STORE_DIR when set (local runs), otherwise
+// DATA_ROOT/store/<MCP_USER_ID>/<MCP_PROFILE_ID>, which is the layout
+// mcp-auth-wrapper documents. DATA_ROOT defaults to /app/data (the image's
+// volume); MCP_USER_ID defaults to "default" so a bare `whatsapp-mcp` still
+// has somewhere to go.
 func StoreDir() string {
 	if d := os.Getenv("STORE_DIR"); d != "" {
 		return d
 	}
-	return "store"
+	root := os.Getenv("DATA_ROOT")
+	if root == "" {
+		root = "/app/data"
+	}
+	user := os.Getenv("MCP_USER_ID")
+	if user == "" {
+		user = "default"
+	}
+	dir := filepath.Join(root, "store", pathSegment(user))
+	if profile := os.Getenv("MCP_PROFILE_ID"); profile != "" {
+		dir = filepath.Join(dir, pathSegment(profile))
+	}
+	return dir
 }
 
-// NewConfig creates a new configuration with default values
-func NewConfig() *Config {
-	cfg := &Config{
-		APIPort:     8080,
-		APIBindHost: "127.0.0.1",
-		// History sync defaults
-		HistorySyncDaysLimit: 365,   // 1 year default
-		HistorySyncSizeMB:    5000,  // 5GB default
-		StorageQuotaMB:       10240, // 10GB default
-		// Presence ping defaults
-		PresencePingEnabled:  true,
-		PresencePingInterval: 20 * time.Minute,
-	}
-
-	// Override with environment variables if set
-	if port := os.Getenv("API_PORT"); port != "" {
-		if p, err := strconv.Atoi(port); err == nil {
-			cfg.APIPort = p
-		}
-	}
-
-	if bindHost := os.Getenv("API_BIND_HOST"); bindHost != "" {
-		cfg.APIBindHost = bindHost
-	}
-
-	if days := os.Getenv("HISTORY_SYNC_DAYS_LIMIT"); days != "" {
-		if d, err := strconv.ParseUint(days, 10, 32); err == nil {
-			cfg.HistorySyncDaysLimit = uint32(d)
-		}
-	}
-
-	if size := os.Getenv("HISTORY_SYNC_SIZE_MB"); size != "" {
-		if s, err := strconv.ParseUint(size, 10, 32); err == nil {
-			cfg.HistorySyncSizeMB = uint32(s)
-		}
-	}
-
-	if quota := os.Getenv("STORAGE_QUOTA_MB"); quota != "" {
-		if q, err := strconv.ParseUint(quota, 10, 32); err == nil {
-			cfg.StorageQuotaMB = uint32(q)
-		}
-	}
-
-	if enabled := os.Getenv("PRESENCE_PING_ENABLED"); enabled == "false" {
-		cfg.PresencePingEnabled = false
-	}
-
-	if interval := os.Getenv("PRESENCE_PING_INTERVAL"); interval != "" {
-		if d, err := time.ParseDuration(interval); err == nil && d > 0 {
-			cfg.PresencePingInterval = d
-		}
-	}
-
-	return cfg
+// MediaDir is where downloaded media is written, under the store so it is
+// per-account and covered by the same volume.
+func MediaDir() string {
+	return filepath.Join(StoreDir(), "media")
 }

@@ -4,28 +4,15 @@
 
 # Logs
 *.log
-whatsapp.log
 
 # Binaries
+whatsapp-bridge/whatsapp-mcp
 whatsapp-bridge/whatsapp-bridge
 
 # Sensitive data - NEVER commit
 store/
 store.bak/
 *.session
-claude_desktop_config.json
-
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-.venv/
-.mypy_cache/
-.ruff_cache/
-.pytest_cache/
-*.egg-info/
-dist/
-build/
 
 # IDE
 .vscode/
@@ -39,7 +26,6 @@ Thumbs.db
 
 # Project-specific
 .claude/
-.task.yaml
 
 # Secrets and credentials
 .env

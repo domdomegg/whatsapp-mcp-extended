@@ -22,7 +22,7 @@ What actually happens.
 ## Environment
 - OS:
 - Docker version:
-- Running via: [Docker / Manual]
+- Image tag:
 
 ## Logs
 ```

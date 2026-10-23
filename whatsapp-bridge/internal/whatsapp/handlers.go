@@ -117,8 +117,8 @@ func (c *Client) GetChatName(messageStore *database.MessageStore, jid types.JID,
 	return name
 }
 
-// HandleMessage processes regular incoming messages with media support and webhook processing
-func (c *Client) HandleMessage(messageStore *database.MessageStore, webhookManager interface{}, msg *events.Message) {
+// HandleMessage stores an incoming message (and starts its media download).
+func (c *Client) HandleMessage(messageStore *database.MessageStore, msg *events.Message) {
 	// Save message to database
 	chatJID := msg.Info.Chat.String()
 	sender := msg.Info.Sender.User
@@ -175,16 +175,6 @@ func (c *Client) HandleMessage(messageStore *database.MessageStore, webhookManag
 	// Auto-download media while CDN URL is still fresh
 	if mediaType != "" && (url != "" || directPath != "") {
 		go c.autoDownloadMedia(msg.Info.ID, chatJID, mediaType, filename, url, directPath, mediaKey, fileSHA256, fileEncSHA256, fileLength)
-	}
-
-	// Process webhooks if manager is available
-	if webhookManager != nil {
-		// Cast to webhook manager and process message
-		if wm, ok := webhookManager.(interface {
-			ProcessMessage(client interface{}, msg *events.Message, chatName string)
-		}); ok {
-			wm.ProcessMessage(c, msg, name)
-		}
 	}
 }
 
