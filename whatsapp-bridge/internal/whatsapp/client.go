@@ -22,7 +22,6 @@ import (
 	waLog "go.mau.fi/whatsmeow/util/log"
 	"google.golang.org/protobuf/proto"
 
-	"whatsapp-bridge/internal/antiban"
 	"whatsapp-bridge/internal/config"
 	localTypes "whatsapp-bridge/internal/types"
 )
@@ -39,9 +38,6 @@ type Client struct {
 	lastConnectedAt     time.Time
 	disconnectedAt      time.Time
 	autoReconnectErrors int
-
-	// Anti-ban protection
-	antiban *antiban.SendInterceptor
 
 	// Latest QR pairing code, guarded by qrMu. Set while pairing (evt.Event=="code")
 	// and cleared on successful link (evt.Event=="success"). Exposed via CurrentQR.
@@ -61,17 +57,10 @@ type Client struct {
 	circuitBreakerCallback func()
 }
 
-// NewClient creates a new WhatsApp client with default configuration.
-// Uses environment defaults for history sync settings.
+// NewClient creates the whatsmeow client for this account's store directory.
 func NewClient(logger waLog.Logger) (*Client, error) {
-	return NewClientWithConfig(logger, config.NewConfig())
-}
-
-// NewClientWithConfig creates a new WhatsApp client with custom configuration.
-// Configures history sync limits and creates/opens the session database.
-func NewClientWithConfig(logger waLog.Logger, cfg *config.Config) (*Client, error) {
 	// Create database connection for storing session data
-	dbLog := waLog.Stdout("Database", "INFO", true)
+	dbLog := logger.Sub("db")
 
 	// Create directory for database if it doesn't exist
 	storeDir := config.StoreDir()
@@ -82,18 +71,15 @@ func NewClientWithConfig(logger waLog.Logger, cfg *config.Config) (*Client, erro
 	// Configure HistorySyncConfig BEFORE creating device (Phase 4)
 	// This affects how much message history is synced on first link
 	store.DeviceProps.HistorySyncConfig = &waProto.DeviceProps_HistorySyncConfig{
-		FullSyncDaysLimit:              proto.Uint32(cfg.HistorySyncDaysLimit),
-		FullSyncSizeMbLimit:            proto.Uint32(cfg.HistorySyncSizeMB),
-		StorageQuotaMb:                 proto.Uint32(cfg.StorageQuotaMB),
+		FullSyncDaysLimit:              proto.Uint32(config.HistorySyncDaysLimit),
+		FullSyncSizeMbLimit:            proto.Uint32(config.HistorySyncSizeMB),
+		StorageQuotaMb:                 proto.Uint32(config.StorageQuotaMB),
 		InlineInitialPayloadInE2EeMsg:  proto.Bool(true),
 		SupportCallLogHistory:          proto.Bool(false),
 		SupportBotUserAgentChatHistory: proto.Bool(true),
 		SupportCagReactionsAndPolls:    proto.Bool(true),
 		SupportGroupHistory:            proto.Bool(true), // Enable group history
 	}
-
-	logger.Infof("HistorySyncConfig: days=%d, size=%dMB, quota=%dMB",
-		cfg.HistorySyncDaysLimit, cfg.HistorySyncSizeMB, cfg.StorageQuotaMB)
 
 	// WAL mode: same as messages.db — allows concurrent readers alongside the bridge writer.
 	dsn := fmt.Sprintf("file:%s?_foreign_keys=on&_journal_mode=WAL&_busy_timeout=5000", filepath.Join(storeDir, "whatsapp.db"))
@@ -120,20 +106,10 @@ func NewClientWithConfig(logger waLog.Logger, cfg *config.Config) (*Client, erro
 		return nil, fmt.Errorf("failed to create WhatsApp client")
 	}
 
-	antibanCfg := antiban.LoadConfig()
-	antibanInterceptor, antibanErr := antiban.NewSendInterceptor(antibanCfg)
-	if antibanErr != nil {
-		logger.Warnf("Failed to initialize antiban, continuing without protection: %v", antibanErr)
-		antibanInterceptor, _ = antiban.NewSendInterceptor(&antiban.Config{Enabled: false})
-	} else if antibanCfg.Enabled {
-		logger.Infof("Antiban protection enabled")
-	}
-
 	c := &Client{
 		Client:    client,
 		logger:    logger,
 		startedAt: time.Now(),
-		antiban:   antibanInterceptor,
 	}
 
 	// Persist retry receipts across restarts — prevents message dedup failures after crashes.
@@ -207,8 +183,8 @@ func (c *Client) Connect() error {
 		for evt := range qrChan {
 			if evt.Event == "code" {
 				c.setCurrentQR(evt.Code)
-				fmt.Println("\nScan this QR code with your WhatsApp app:")
-				qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
+				fmt.Fprintln(os.Stderr, "Scan this QR code with your WhatsApp app (or call get_setup_qr):")
+				qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stderr)
 			} else if evt.Event == "success" {
 				c.setCurrentQR("")
 				connected <- true
@@ -219,7 +195,7 @@ func (c *Client) Connect() error {
 		// Wait for connection
 		select {
 		case <-connected:
-			fmt.Println("\nSuccessfully connected and authenticated!")
+			c.logger.Infof("Successfully connected and authenticated")
 		case <-time.After(3 * time.Minute):
 			c.MarkDisconnected() // triggers watchdog to restart container
 			return fmt.Errorf("timeout waiting for QR code scan")
@@ -659,9 +635,4 @@ func (c *Client) HandlePairingError(err error) {
 	c.pairingError = err
 	c.pairingInProgress = false
 	c.logger.Errorf("Pairing failed: %v", err)
-}
-
-// Antiban returns the anti-ban send interceptor.
-func (c *Client) Antiban() *antiban.SendInterceptor {
-	return c.antiban
 }

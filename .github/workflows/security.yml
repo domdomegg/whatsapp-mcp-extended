@@ -25,35 +25,16 @@ jobs:
           go install golang.org/x/vuln/cmd/govulncheck@latest
           govulncheck ./...
 
-  python-security:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install dependencies
-        working-directory: whatsapp-mcp-server
-        run: |
-          pip install pip-audit
-
-      - name: Run pip-audit
-        working-directory: whatsapp-mcp-server
-        run: |
-          pip-audit -r requirements.txt || true
-
   docker-security:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Run Trivy on Dockerfiles
+      - name: Run Trivy on Dockerfile
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: 'config'
-          scan-ref: '.'
+          scan-ref: 'Dockerfile'
           format: 'table'
           exit-code: '0'  # Don't fail, just report
 

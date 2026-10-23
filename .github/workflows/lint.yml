@@ -26,40 +26,14 @@ jobs:
         working-directory: whatsapp-bridge
         run: golangci-lint run --timeout=5m
 
-  python-lint:
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install ruff
-        run: pip install ruff
-
-      - name: Run ruff check
-        run: ruff check whatsapp-mcp-server/
-
-      - name: Run ruff format check
-        run: ruff format --check whatsapp-mcp-server/
-
   dockerfile-lint:
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Lint Dockerfiles
+      - name: Lint Dockerfile
         uses: hadolint/hadolint-action@v3.1.0
         with:
-          dockerfile: Dockerfile.bridge
-          failure-threshold: error
-
-      - name: Lint MCP Dockerfile
-        uses: hadolint/hadolint-action@v3.1.0
-        with:
-          dockerfile: Dockerfile.mcp
+          dockerfile: Dockerfile
           failure-threshold: error

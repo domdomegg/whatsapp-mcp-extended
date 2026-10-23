@@ -2,6 +2,7 @@ package whatsapp
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -9,67 +10,39 @@ import (
 )
 
 func TestValidateMediaPath(t *testing.T) {
+	// Only the account's store directory and the temp dir are readable: that
+	// is where downloads and inline uploads land. No env override exists.
+	// A store outside the temp dir, so the two allowed roots stay distinct;
+	// validateMediaPath only compares paths, nothing is created.
+	store := "/var/lib/whatsapp-mcp-test-store"
+	t.Setenv("STORE_DIR", store)
+	tmp := os.TempDir()
 	tests := []struct {
 		name        string
 		path        string
-		wantErr     bool
 		errContains string
 	}{
-		{"empty path", "", false, ""},
-		{"allowed /app/media", "/app/media/file.jpg", false, ""},
-		{"allowed /app/store", "/app/store/data.db", false, ""},
-		{"allowed /tmp", "/tmp/upload.png", false, ""},
-		{"path traversal ../", "/app/media/../etc/passwd", true, "traversal"},
-		{"path traversal multiple", "/app/media/../../etc/passwd", true, "traversal"},
-		{"path traversal in middle", "/app/../../../etc/passwd", true, "traversal"},
-		{"outside allowed /etc", "/etc/passwd", true, "outside allowed"},
-		{"outside allowed /home", "/home/user/file.txt", true, "outside allowed"},
-		{"outside allowed /var", "/var/log/syslog", true, "outside allowed"},
+		{"empty path", "", ""},
+		{"inside the store", filepath.Join(store, "media", "file.jpg"), ""},
+		{"inside the temp dir", filepath.Join(tmp, "upload.png"), ""},
+		{"path traversal", store + "/../etc/passwd", "traversal"},
+		{"store prefix but sibling dir", store + "-other/file.jpg", "outside allowed"},
+		{"outside /etc", "/etc/passwd", "outside allowed"},
+		{"outside /home", "/home/user/file.txt", "outside allowed"},
 	}
-
-	os.Unsetenv("DISABLE_PATH_CHECK")
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := validateMediaPath(tt.path)
-
-			if tt.wantErr {
-				if err == nil {
-					t.Errorf("validateMediaPath(%s) = nil, want error containing %q", tt.path, tt.errContains)
-					return
-				}
-				if tt.errContains != "" && !strings.Contains(strings.ToLower(err.Error()), strings.ToLower(tt.errContains)) {
-					t.Errorf("validateMediaPath(%s) error = %v, want error containing %q", tt.path, err, tt.errContains)
+			if tt.errContains == "" {
+				if err != nil {
+					t.Errorf("validateMediaPath(%s) = %v, want nil", tt.path, err)
 				}
 				return
 			}
-
-			if err != nil {
-				t.Errorf("validateMediaPath(%s) = %v, want nil", tt.path, err)
+			if err == nil || !strings.Contains(err.Error(), tt.errContains) {
+				t.Errorf("validateMediaPath(%s) = %v, want error containing %q", tt.path, err, tt.errContains)
 			}
 		})
-	}
-}
-
-func TestValidateMediaPath_DisableCheck(t *testing.T) {
-	original := os.Getenv("DISABLE_PATH_CHECK")
-	defer os.Setenv("DISABLE_PATH_CHECK", original)
-
-	os.Setenv("DISABLE_PATH_CHECK", "true")
-
-	if err := validateMediaPath("/home/user/file.txt"); err != nil {
-		t.Errorf("With DISABLE_PATH_CHECK=true, validateMediaPath should allow external paths, got: %v", err)
-	}
-}
-
-func TestValidateMediaPath_TraversalAlwaysBlocked(t *testing.T) {
-	original := os.Getenv("DISABLE_PATH_CHECK")
-	defer os.Setenv("DISABLE_PATH_CHECK", original)
-
-	os.Setenv("DISABLE_PATH_CHECK", "true")
-
-	if err := validateMediaPath("/app/media/../../../etc/passwd"); err == nil {
-		t.Error("Path traversal should be blocked even with DISABLE_PATH_CHECK=true")
 	}
 }
 

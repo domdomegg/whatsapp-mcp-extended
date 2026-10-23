@@ -8,8 +8,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"whatsapp-bridge/internal/config"
 
-	"whatsapp-bridge/internal/antiban"
 	"whatsapp-bridge/internal/database"
 	bridgeTypes "whatsapp-bridge/internal/types"
 
@@ -97,49 +97,31 @@ func extractMentionsFromText(text string) []string {
 	return jids
 }
 
-// allowedMediaDirs contains directories allowed for media access
-var allowedMediaDirs = []string{
-	"/app/media",
-	"/app/store",
-	"/app/whatsapp-bridge/store",
-	"/tmp",
-}
-
-// validateMediaPath checks if the path is within allowed directories
+// validateMediaPath only allows files under this account's store (where
+// downloads and inline uploads land) or the system temp dir, and never a path
+// containing "..". There is no override: the only caller is the MCP server in
+// the same process.
 func validateMediaPath(mediaPath string) error {
 	if mediaPath == "" {
 		return nil
 	}
-
-	// Clean and get absolute path
-	cleanPath := filepath.Clean(mediaPath)
-	absPath, err := filepath.Abs(cleanPath)
-	if err != nil {
-		return fmt.Errorf("invalid media path: %v", err)
-	}
-
-	// Check for path traversal attempts
 	if strings.Contains(mediaPath, "..") {
 		return fmt.Errorf("path traversal not allowed")
 	}
-
-	// Allow if DISABLE_PATH_CHECK is set (for development)
-	if os.Getenv("DISABLE_PATH_CHECK") == "true" {
-		return nil
+	absPath, err := filepath.Abs(filepath.Clean(mediaPath))
+	if err != nil {
+		return fmt.Errorf("invalid media path: %v", err)
 	}
-
-	// Check if path is within allowed directories
-	for _, allowedDir := range allowedMediaDirs {
-		allowedAbs, err := filepath.Abs(allowedDir)
+	for _, dir := range []string{config.StoreDir(), os.TempDir()} {
+		allowed, err := filepath.Abs(dir)
 		if err != nil {
 			continue
 		}
-		if strings.HasPrefix(absPath, allowedAbs) {
+		if strings.HasPrefix(absPath, allowed+string(filepath.Separator)) {
 			return nil
 		}
 	}
-
-	return fmt.Errorf("media path outside allowed directories")
+	return fmt.Errorf("media path outside allowed directories (the account store or the temp dir)")
 }
 
 // SendMessage sends a WhatsApp message with optional media and mentions
@@ -279,24 +261,11 @@ func (c *Client) SendMessage(messageStore *database.MessageStore, recipient stri
 		}
 	}
 
-	// Antiban: simulate typing and enforce rate limit / warm-up before sending
-	if c.antiban.Enabled() {
-		_ = c.SendTypingIndicator(recipientJID.String(), "typing")
-	}
-	if err := c.antiban.BeforeSend(context.Background(), antiban.Text, len(message)); err != nil {
-		_ = c.SendTypingIndicator(recipientJID.String(), "paused")
-		return bridgeTypes.SendResult{Success: false, Error: fmt.Sprintf("antiban blocked send: %v", err)}
-	}
-
 	// Send message
 	sendResp, err := c.Client.SendMessage(context.Background(), recipientJID, msg)
 	if err != nil {
-		_ = c.SendTypingIndicator(recipientJID.String(), "paused")
-		c.antiban.AfterSendFailed(antiban.Text, err)
 		return bridgeTypes.SendResult{Success: false, Error: fmt.Sprintf("Error sending message: %v", err)}
 	}
-	_ = c.SendTypingIndicator(recipientJID.String(), "paused")
-	c.antiban.AfterSend(antiban.Text)
 
 	content := ExtractTextContent(msg)
 	mediaType, filename, url, directPath, mediaKey, fileSHA256, fileEncSHA256, fileLength := ExtractMediaInfo(msg)
@@ -359,15 +328,10 @@ func (c *Client) SendReaction(messageStore *database.MessageStore, chatJID, mess
 
 	msg := c.Client.BuildReaction(chat, senderJID, msgID, emoji)
 
-	if err := c.antiban.BeforeSend(context.Background(), antiban.Reaction, 0); err != nil {
-		return fmt.Errorf("antiban blocked reaction: %v", err)
-	}
 	_, err = c.Client.SendMessage(context.Background(), chat, msg)
 	if err != nil {
-		c.antiban.AfterSendFailed(antiban.Reaction, err)
 		return fmt.Errorf("failed to send reaction: %v", err)
 	}
-	c.antiban.AfterSend(antiban.Reaction)
 
 	return nil
 }
@@ -390,20 +354,10 @@ func (c *Client) EditMessage(chatJID, messageID, newContent string) error {
 	}
 	msg := c.Client.BuildEdit(chat, msgID, newMsg)
 
-	if c.antiban.Enabled() {
-		_ = c.SendTypingIndicator(chatJID, "typing")
-	}
-	if err := c.antiban.BeforeSend(context.Background(), antiban.Edit, len(newContent)); err != nil {
-		_ = c.SendTypingIndicator(chatJID, "paused")
-		return fmt.Errorf("antiban blocked edit: %v", err)
-	}
 	_, err = c.Client.SendMessage(context.Background(), chat, msg)
-	_ = c.SendTypingIndicator(chatJID, "paused")
 	if err != nil {
-		c.antiban.AfterSendFailed(antiban.Edit, err)
 		return fmt.Errorf("failed to edit message: %v", err)
 	}
-	c.antiban.AfterSend(antiban.Edit)
 
 	return nil
 }
@@ -433,15 +387,10 @@ func (c *Client) DeleteMessage(chatJID, messageID, senderJID string) error {
 
 	msg := c.Client.BuildRevoke(chat, sender, msgID)
 
-	if err := c.antiban.BeforeSend(context.Background(), antiban.Delete, 0); err != nil {
-		return fmt.Errorf("antiban blocked delete: %v", err)
-	}
 	_, err = c.Client.SendMessage(context.Background(), chat, msg)
 	if err != nil {
-		c.antiban.AfterSendFailed(antiban.Delete, err)
 		return fmt.Errorf("failed to delete message: %v", err)
 	}
-	c.antiban.AfterSend(antiban.Delete)
 
 	return nil
 }
@@ -661,23 +610,11 @@ func (c *Client) CreatePoll(chatJID string, question string, options []string, m
 	// Build poll creation message
 	pollMsg := c.Client.BuildPollCreation(question, options, selectableCount)
 
-	// Antiban: typing indicator + rate limit
-	if c.antiban.Enabled() {
-		_ = c.SendTypingIndicator(chatJID, "typing")
-	}
-	if err := c.antiban.BeforeSend(context.Background(), antiban.Poll, len(question)); err != nil {
-		_ = c.SendTypingIndicator(chatJID, "paused")
-		return bridgeTypes.SendResult{Success: false, Error: fmt.Sprintf("antiban blocked poll: %v", err)}, err
-	}
-
 	// Send the poll
 	resp, err := c.Client.SendMessage(context.Background(), chat, pollMsg)
-	_ = c.SendTypingIndicator(chatJID, "paused")
 	if err != nil {
-		c.antiban.AfterSendFailed(antiban.Poll, err)
 		return bridgeTypes.SendResult{Success: false, Error: fmt.Sprintf("failed to send poll: %v", err)}, err
 	}
-	c.antiban.AfterSend(antiban.Poll)
 
 	return bridgeTypes.SendResult{
 		Success:   true,
@@ -737,15 +674,10 @@ func (c *Client) RequestChatHistory(chatJID string, oldestMsgID string, oldestMs
 
 	// Send as peer message to own device (NOT to the group/chat).
 	// History sync is a device-to-device protocol request to our own phone.
-	if err := c.antiban.BeforeSend(context.Background(), antiban.Peer, 0); err != nil {
-		return fmt.Errorf("antiban blocked history request: %v", err)
-	}
 	_, err = c.Client.SendMessage(context.Background(), ownJID, msg, whatsmeow.SendRequestExtra{Peer: true})
 	if err != nil {
-		c.antiban.AfterSendFailed(antiban.Peer, err)
 		return fmt.Errorf("failed to send history request: %v", err)
 	}
-	c.antiban.AfterSend(antiban.Peer)
 
 	return nil
 }

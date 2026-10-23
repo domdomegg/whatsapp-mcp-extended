@@ -11,7 +11,7 @@ import (
 	"whatsapp-bridge/internal/config"
 )
 
-// MessageStore handles database operations for storing message history and webhook configurations
+// MessageStore is this account's messages.db: chats, messages and nicknames.
 type MessageStore struct {
 	db *sql.DB
 }
@@ -160,39 +160,7 @@ func createTables(db *sql.DB) error {
 			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		);
 
-		CREATE TABLE IF NOT EXISTS webhook_configs (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			name TEXT NOT NULL,
-			webhook_url TEXT NOT NULL,
-			secret_token TEXT,
-			enabled BOOLEAN DEFAULT 1,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-		);
 
-		CREATE TABLE IF NOT EXISTS webhook_triggers (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			webhook_config_id INTEGER REFERENCES webhook_configs(id),
-			trigger_type TEXT NOT NULL,
-			trigger_value TEXT,
-			match_type TEXT DEFAULT 'exact',
-			enabled BOOLEAN DEFAULT 1
-		);
-
-		CREATE TABLE IF NOT EXISTS webhook_logs (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			webhook_config_id INTEGER REFERENCES webhook_configs(id),
-			message_id TEXT,
-			chat_jid TEXT,
-			trigger_type TEXT,
-			trigger_value TEXT,
-			payload TEXT,
-			response_status INTEGER,
-			response_body TEXT,
-			attempt_count INTEGER DEFAULT 1,
-			delivered_at TIMESTAMP,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-		);
 	`)
 	return err
 }
