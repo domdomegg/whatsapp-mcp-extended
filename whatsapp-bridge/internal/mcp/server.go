@@ -71,14 +71,21 @@ func tool[In any](s *Server, name, title, description string, a annotations, h f
 		})
 }
 
-// jsonResult renders a value as a text content block (pretty JSON) and as
-// structured content, the way FastMCP returned dicts and lists.
+// jsonResult renders a value as a text content block (pretty JSON) and, when
+// it is a JSON object, also as structured content. MCP's structuredContent
+// must be an object: mcp-auth-wrapper rejected the first deploy's list results
+// ("expected record, received array"), so arrays and null travel as text only,
+// which is how FastMCP's list returns reached clients anyway.
 func jsonResult(v any) *sdk.CallToolResult {
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return &sdk.CallToolResult{IsError: true, Content: []sdk.Content{&sdk.TextContent{Text: fmt.Sprintf("encode result: %v", err)}}}
 	}
-	return &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: string(b)}}, StructuredContent: v}
+	result := &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: string(b)}}}
+	if len(b) > 0 && b[0] == '{' {
+		result.StructuredContent = v
+	}
+	return result
 }
 
 // m is shorthand for an ad-hoc JSON object, the shape most action tools return.
