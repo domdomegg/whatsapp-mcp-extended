@@ -83,13 +83,13 @@ func orTrue(v *bool) bool { return v == nil || *v }
 func (s *Server) registerReadTools() {
 	tool(s, "search_contacts", "Search Contacts",
 		"Search WhatsApp contacts by name or phone number. Returns contact dicts with jid, phone_number, name, first_name, full_name, push_name, business_name, nickname. Use the returned jid with list_messages to filter by contact; use get_contact_context for details, chats or last interaction.",
-		readOnly(), func(_ context.Context, in searchContactsIn) (any, error) {
+		readOnly().list(), func(_ context.Context, in searchContactsIn) (any, error) {
 			return s.searchContacts(in.Query)
 		})
 
 	tool(s, "list_messages", "List Messages",
 		"Get WhatsApp messages matching the criteria, newest first. If expected messages are missing, use request_history to sync older messages from the phone. Set include_context=true to get surrounding messages inline. Use search_contacts first to find a contact's JID.",
-		readOnly(), func(_ context.Context, in listMessagesIn) (any, error) {
+		readOnly().list(), func(_ context.Context, in listMessagesIn) (any, error) {
 			o := database.ListMessagesOptions{
 				ChatJID: in.ChatJID, Query: in.Query, Limit: orDefault(in.Limit, 20), Page: in.Page,
 				IncludeContext: in.IncludeContext, ContextBefore: orDefaultPtr(in.ContextBefore, 1), ContextAfter: orDefaultPtr(in.ContextAfter, 1),
@@ -113,7 +113,7 @@ func (s *Server) registerReadTools() {
 
 	tool(s, "list_chats", "List Chats",
 		"Get WhatsApp chats matching the criteria. Use the returned jid with list_messages for a chat's messages, get_chat for one chat's metadata, and get_group_info (jid ending @g.us) for a group's participants.",
-		readOnly(), func(_ context.Context, in listChatsIn) (any, error) {
+		readOnly().list(), func(_ context.Context, in listChatsIn) (any, error) {
 			return s.store.ListChats(database.ListChatsOptions{
 				Query: in.Query, Limit: orDefault(in.Limit, 20), Page: in.Page,
 				IncludeLastMessage: orTrue(in.IncludeLastMessage), SortByName: in.SortBy == "name",
@@ -121,7 +121,7 @@ func (s *Server) registerReadTools() {
 		})
 
 	tool(s, "get_chat", "Get Chat", "Get WhatsApp chat metadata by JID.",
-		readOnly(), func(_ context.Context, in getChatIn) (any, error) {
+		readOnly().nullable(), func(_ context.Context, in getChatIn) (any, error) {
 			c, err := s.store.GetChat(in.ChatJID, orTrue(in.IncludeLastMessage))
 			if err != nil {
 				return nil, err
@@ -140,7 +140,7 @@ func (s *Server) registerReadTools() {
 
 	tool(s, "list_all_contacts", "List All Contacts",
 		"List WhatsApp contacts with jid, phone_number, name, first_name, full_name, push_name, business_name, nickname.",
-		readOnly(), func(_ context.Context, in listAllContactsIn) (any, error) {
+		readOnly().list(), func(_ context.Context, in listAllContactsIn) (any, error) {
 			rows, err := s.contacts.ListAll(orDefault(in.Limit, 100))
 			if err != nil {
 				return nil, err
@@ -202,7 +202,7 @@ func (s *Server) registerReadTools() {
 
 	tool(s, "get_direct_chat_by_contact", "Get Direct Chat By Contact",
 		"Find the direct-message chat for a phone number (DMs only, partial match). Faster than get_contact_context when you only need the chat JID.",
-		readOnly(), func(_ context.Context, in getDirectChatIn) (any, error) {
+		readOnly().nullable(), func(_ context.Context, in getDirectChatIn) (any, error) {
 			c, err := s.store.GetDirectChatByContact(in.PhoneNumber)
 			if err != nil {
 				return nil, err

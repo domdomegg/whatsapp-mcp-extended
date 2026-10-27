@@ -58,7 +58,7 @@ func imageAndJSON(png []byte, mime string, status any) *sdk.CallToolResult {
 
 // rawTool is for handlers that build their own content (images).
 func rawTool[In any](s *Server, name, title, description string, a annotations, h func(ctx context.Context, in In) (*sdk.CallToolResult, error)) {
-	sdk.AddTool(s.mcp, &sdk.Tool{Name: name, Title: title, Description: description, Annotations: a.toSDK(title)},
+	sdk.AddTool(s.mcp, &sdk.Tool{Name: name, Title: title, Description: description, Annotations: a.toSDK(title), OutputSchema: a.outputSchema()},
 		func(ctx context.Context, _ *sdk.CallToolRequest, in In) (*sdk.CallToolResult, any, error) {
 			r, err := h(ctx, in)
 			if err != nil {

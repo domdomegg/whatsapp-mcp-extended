@@ -41,9 +41,43 @@ func (s *Server) Run(ctx context.Context) error {
 	return s.mcp.Run(ctx, &sdk.StdioTransport{})
 }
 
-// annotations describes a tool the way the Python decorator did.
+// shape says what a tool returns, which decides its outputSchema and how the
+// result is wrapped: MCP requires structuredContent to be a JSON object, so
+// lists and nullable results travel as {"result": ...}.
+type shape int
+
+const (
+	returnsObject shape = iota
+	returnsList
+	returnsNullableObject
+)
+
+// annotations describes a tool the way the Python decorator did, plus its shape.
 type annotations struct {
 	readOnly, destructive, idempotent, openWorld bool
+	returns                                      shape
+}
+
+func (a annotations) list() annotations     { a.returns = returnsList; return a }
+func (a annotations) nullable() annotations { a.returns = returnsNullableObject; return a }
+
+func (a annotations) outputSchema() map[string]any {
+	switch a.returns {
+	case returnsList:
+		return map[string]any{
+			"type":       "object",
+			"properties": map[string]any{"result": map[string]any{"type": "array", "items": map[string]any{"type": "object"}}},
+			"required":   []string{"result"},
+		}
+	case returnsNullableObject:
+		return map[string]any{
+			"type":       "object",
+			"properties": map[string]any{"result": map[string]any{"type": []string{"object", "null"}}},
+			"required":   []string{"result"},
+		}
+	default:
+		return map[string]any{"type": "object"}
+	}
 }
 
 func readOnly() annotations    { return annotations{readOnly: true, idempotent: true} }
@@ -61,7 +95,7 @@ func boolPtr(b bool) *bool { return &b }
 // tool registers a handler that returns a JSON-serialisable value, which goes
 // out both as text and as structured content.
 func tool[In any](s *Server, name, title, description string, a annotations, h func(ctx context.Context, in In) (any, error)) {
-	sdk.AddTool(s.mcp, &sdk.Tool{Name: name, Title: title, Description: description, Annotations: a.toSDK(title)},
+	sdk.AddTool(s.mcp, &sdk.Tool{Name: name, Title: title, Description: description, Annotations: a.toSDK(title), OutputSchema: a.outputSchema()},
 		func(ctx context.Context, _ *sdk.CallToolRequest, in In) (*sdk.CallToolResult, any, error) {
 			out, err := h(ctx, in)
 			if err != nil {
@@ -71,21 +105,27 @@ func tool[In any](s *Server, name, title, description string, a annotations, h f
 		})
 }
 
-// jsonResult renders a value as a text content block (pretty JSON) and, when
-// it is a JSON object, also as structured content. MCP's structuredContent
-// must be an object: mcp-auth-wrapper rejected the first deploy's list results
-// ("expected record, received array"), so arrays and null travel as text only,
-// which is how FastMCP's list returns reached clients anyway.
+// jsonResult renders a value as structured content plus the same JSON as text.
+// MCP requires structuredContent to be an object, so anything else (a list, a
+// nullable lookup, a string) is wrapped as {"result": ...}; objects pass through
+// unchanged. Every tool is therefore structured, and the text block always
+// mirrors it, as the spec recommends.
 func jsonResult(v any) *sdk.CallToolResult {
-	b, err := json.MarshalIndent(v, "", "  ")
+	structured := structure(v)
+	b, err := json.MarshalIndent(structured, "", "  ")
 	if err != nil {
 		return &sdk.CallToolResult{IsError: true, Content: []sdk.Content{&sdk.TextContent{Text: fmt.Sprintf("encode result: %v", err)}}}
 	}
-	result := &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: string(b)}}}
-	if len(b) > 0 && b[0] == '{' {
-		result.StructuredContent = v
+	return &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: string(b)}}, StructuredContent: structured}
+}
+
+// structure returns v itself when it serialises to a JSON object, else {"result": v}.
+func structure(v any) any {
+	b, err := json.Marshal(v)
+	if err == nil && len(b) > 0 && b[0] == '{' {
+		return v
 	}
-	return result
+	return m{"result": v}
 }
 
 // m is shorthand for an ad-hoc JSON object, the shape most action tools return.
