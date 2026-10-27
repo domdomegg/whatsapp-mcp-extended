@@ -59,8 +59,6 @@ Back up the whole `store/` directory; nothing else is state. Each profile is one
 
 Every tool returns structured content and declares an `outputSchema`; tools that return a list or a nullable lookup wrap it as `{"result": ...}` (MCP requires an object there).
 
-Every tool returns structured content and declares an `outputSchema`; tools that return a list or a nullable lookup wrap it as `{"result": ...}` (MCP requires an object there).
-
 Resources: `whatsapp://status` (connection and link state) and `whatsapp://sync-status` (message and chat counts, newest message time).
 
 JIDs: individuals are `<phone>@s.whatsapp.net` (or `<id>@lid`), groups `<id>@g.us`. Message IDs are the hex strings returned by the send tools and are what `edit_message`, `delete_message`, `send_reaction` and `mark_read` take.
