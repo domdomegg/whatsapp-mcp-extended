@@ -51,9 +51,13 @@ func mimeForExt(ext string) string {
 
 // imageAndJSON is the shape FastMCP produced for "[Image, dict]" returns: an
 // image block followed by the status as text.
+// imageAndJSON returns an image block plus the status as both text and
+// structured content. The structured part matters: rawTool declares an
+// outputSchema, and MCP clients reject a result that declares one but carries no
+// structuredContent (download_media failed that way for every image).
 func imageAndJSON(png []byte, mime string, status any) *sdk.CallToolResult {
 	text := jsonResult(status)
-	return &sdk.CallToolResult{Content: []sdk.Content{&sdk.ImageContent{Data: png, MIMEType: mime}, text.Content[0]}}
+	return &sdk.CallToolResult{Content: []sdk.Content{&sdk.ImageContent{Data: png, MIMEType: mime}, text.Content[0]}, StructuredContent: text.StructuredContent}
 }
 
 // rawTool is for handlers that build their own content (images).
