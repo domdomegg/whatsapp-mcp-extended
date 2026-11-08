@@ -295,14 +295,16 @@ func eventHandler(client *whatsapp.Client, messageStore *database.MessageStore, 
 		case *events.KeepAliveTimeout:
 			logger.Warnf("⚠ KeepAlive timeout (errors: %d)", v.ErrorCount)
 			if v.ErrorCount >= 3 {
-				logger.Errorf("KeepAlive: %d consecutive failures, forcing disconnect+reconnect", v.ErrorCount)
-				client.Disconnect()
-				go func() {
-					time.Sleep(2 * time.Second)
-					if err := client.Client.Connect(); err != nil {
-						logger.Errorf("reconnect after KeepAlive failure: %v", err)
-					}
-				}()
+				logger.Errorf("KeepAlive: %d consecutive failures, forcing reconnect", v.ErrorCount)
+				// Not Disconnect() + Connect(): a manual Disconnect switches off
+				// whatsmeow's auto-reconnect and emits no Disconnected event, so a
+				// single failed Connect (e.g. a DNS blip) left the account offline
+				// for good with the watchdog none the wiser. ResetConnection drops
+				// the socket and hands over to whatsmeow's retry loop (growing delay,
+				// bounded by AutoReconnectHook), and marking the gap here lets the
+				// watchdog exit if that never recovers.
+				client.MarkDisconnected()
+				client.ResetConnection()
 			}
 
 		case *events.KeepAliveRestored:
