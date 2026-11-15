@@ -164,6 +164,10 @@ func (c *Client) CurrentQR() string {
 	return c.currentQR
 }
 
+// pairingDeadline bounds how long an unpaired client keeps offering fresh QR
+// codes before giving up and letting the watchdog restart it.
+const pairingDeadline = 30 * time.Minute
+
 // Connect establishes connection to WhatsApp servers.
 // For new devices, displays QR code for phone pairing.
 // For existing sessions, reconnects using stored credentials.
@@ -172,24 +176,52 @@ func (c *Client) Connect() error {
 	connected := make(chan bool, 1)
 
 	if c.Store.ID == nil {
-		// No ID stored, this is a new client, need to pair with phone
-		qrChan, _ := c.GetQRChannel(context.Background())
-		err := c.Client.Connect()
-		if err != nil {
-			return fmt.Errorf("failed to connect: %v", err)
-		}
+		// No ID stored, this is a new client, need to pair with phone.
+		//
+		// whatsmeow's QR channel emits a fresh code every ~20s for about two
+		// minutes, then a "timeout" event and closes. Before this loop the last
+		// code was left in place after the timeout, so get_setup_qr kept serving
+		// a dead code and every later scan failed with "Couldn't link device"
+		// until the watchdog restarted the process. Now a timeout reconnects
+		// for a new channel, so the served code is always one the phone can use.
+		deadline := time.Now().Add(pairingDeadline)
+		for {
+			qrChan, err := c.GetQRChannel(context.Background())
+			if err != nil {
+				return fmt.Errorf("failed to open QR channel: %v", err)
+			}
+			if err := c.Client.Connect(); err != nil {
+				return fmt.Errorf("failed to connect: %v", err)
+			}
 
-		// Print QR code for pairing with phone
-		for evt := range qrChan {
-			if evt.Event == "code" {
-				c.setCurrentQR(evt.Code)
-				fmt.Fprintln(os.Stderr, "Scan this QR code with your WhatsApp app (or call get_setup_qr):")
-				qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stderr)
-			} else if evt.Event == "success" {
-				c.setCurrentQR("")
+			paired := false
+			for evt := range qrChan {
+				switch evt.Event {
+				case "code":
+					c.setCurrentQR(evt.Code)
+					fmt.Fprintln(os.Stderr, "Scan this QR code with your WhatsApp app (or call get_setup_qr):")
+					qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stderr)
+				case "success":
+					c.setCurrentQR("")
+					paired = true
+				default:
+					// "timeout", or an error such as err-client-outdated: the codes
+					// from this channel are no longer valid.
+					c.setCurrentQR("")
+					c.logger.Warnf("QR pairing channel ended: %s", evt.Event)
+				}
+			}
+
+			if paired {
 				connected <- true
 				break
 			}
+			if time.Now().After(deadline) {
+				c.MarkDisconnected() // triggers watchdog to restart container
+				return fmt.Errorf("timeout waiting for QR code scan")
+			}
+			c.logger.Infof("QR code expired without a scan; requesting a new one")
+			c.Client.Disconnect()
 		}
 
 		// Wait for connection
