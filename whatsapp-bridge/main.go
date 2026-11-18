@@ -89,7 +89,12 @@ func run() error {
 	// and a not-yet-linked account needs the QR tools to be reachable.
 	go func() {
 		if err := client.Connect(); err != nil {
+			// A failed first connect (e.g. a network blip at startup) used to leave
+			// the process alive but permanently offline: nothing retried, and the
+			// watchdog only watches disconnects that follow a connection. Count it
+			// as a disconnect so the watchdog exits and the next call respawns us.
 			logger.Errorf("connect: %v", err)
+			client.MarkDisconnected()
 		}
 	}()
 
