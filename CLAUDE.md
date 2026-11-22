@@ -49,4 +49,4 @@ docker build -t whatsapp-mcp-extended .
 
 ## CI
 
-`.github/workflows/`: `go-test.yml` (test + build), `lint.yml` (golangci-lint, hadolint), `security.yml` (govulncheck, trivy, gitleaks), `publish.yml` (image to GHCR on push to main / tags).
+`.github/workflows/`: `go-test.yml` (test + build), `lint.yml` (golangci-lint, hadolint), `publish.yml` (image to GHCR on push to main / tags). Dependency and security updates come from Dependabot (`.github/dependabot.yml`).
