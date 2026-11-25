@@ -155,14 +155,14 @@ func (s *Server) registerMediaTools() {
 		})
 
 	rawTool(s, "get_setup_qr", "Get Setup QR",
-		"Get the WhatsApp linking QR code to connect this account. Call when setup_status says needs_pairing; scan it from WhatsApp on your phone: Settings > Linked Devices > Link a Device. The QR rotates — call again for a fresh one.",
-		readOnly(), func(_ context.Context, _ struct{}) (*sdk.CallToolResult, error) {
+		"Get the WhatsApp linking QR code to connect this account. Call when setup_status says needs_pairing; scan it from WhatsApp on your phone: Settings > Linked Devices > Link a Device. Each call returns a code that is valid right now; if a scan fails, call again.",
+		readOnly(), func(ctx context.Context, _ struct{}) (*sdk.CallToolResult, error) {
 			if s.client.Store.ID != nil {
 				return jsonResult(m{"success": true, "needs_pairing": false, "message": "Account already linked."}), nil
 			}
-			code := s.client.CurrentQR()
-			if code == "" {
-				return jsonResult(m{"success": false, "needs_pairing": true, "error": "No QR code available yet; the client is still connecting. Try again in a few seconds."}), nil
+			code, err := s.client.PairingCode(ctx)
+			if err != nil {
+				return jsonResult(m{"success": false, "needs_pairing": true, "error": fmt.Sprintf("Could not get a QR code: %v. Try again.", err)}), nil
 			}
 			png, err := qrcode.Encode(code, qrcode.Medium, 512)
 			if err != nil {
@@ -170,7 +170,7 @@ func (s *Server) registerMediaTools() {
 			}
 			return imageAndJSON(png, "image/png", m{
 				"success": true, "needs_pairing": true,
-				"message": "Scan this QR in WhatsApp > Linked Devices > Link a Device. It rotates; call again for a fresh code.",
+				"message": "Scan this QR in WhatsApp > Linked Devices > Link a Device within about 20 seconds; if the scan fails, call again for a fresh code.",
 			}), nil
 		})
 
