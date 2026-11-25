@@ -5,6 +5,7 @@ package whatsapp
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -39,10 +40,13 @@ type Client struct {
 	disconnectedAt      time.Time
 	autoReconnectErrors int
 
-	// Latest QR pairing code, guarded by qrMu. Set while pairing (evt.Event=="code")
-	// and cleared on successful link (evt.Event=="success"). Exposed via CurrentQR.
+	// Pairing state, guarded by qrMu. currentQR is the latest code of the live
+	// pairing session (empty when there is none); qrSession is closed when that
+	// session ends. pairMu serialises session starts. See PairingCode.
 	qrMu      sync.Mutex
 	currentQR string
+	qrSession chan struct{}
+	pairMu    sync.Mutex
 
 	// Pairing state
 	pairingMutex      sync.Mutex
@@ -168,66 +172,131 @@ func (c *Client) CurrentQR() string {
 // For new devices, displays QR code for phone pairing.
 // For existing sessions, reconnects using stored credentials.
 func (c *Client) Connect() error {
-	// Create channel to track connection success
-	connected := make(chan bool, 1)
-
 	if c.Store.ID == nil {
-		// No ID stored, this is a new client, need to pair with phone
-		qrChan, _ := c.GetQRChannel(context.Background())
-		err := c.Client.Connect()
-		if err != nil {
-			return fmt.Errorf("failed to connect: %v", err)
-		}
+		// Not linked. Pairing is driven by get_setup_qr (PairingCode) so codes are
+		// only requested while someone is actually looking at them; the process
+		// just waits here. needs_pairing keeps the health check quiet meanwhile.
+		c.logger.Infof("not linked to a WhatsApp account: call get_setup_qr to pair")
+		return nil
+	}
 
-		// Print QR code for pairing with phone
-		for evt := range qrChan {
-			if evt.Event == "code" {
-				c.setCurrentQR(evt.Code)
-				fmt.Fprintln(os.Stderr, "Scan this QR code with your WhatsApp app (or call get_setup_qr):")
-				qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stderr)
-			} else if evt.Event == "success" {
-				c.setCurrentQR("")
-				connected <- true
-				break
+	// Already paired — wait for the Connected event instead of sleeping.
+	connCh := make(chan struct{}, 1)
+	handlerID := c.AddEventHandler(func(evt interface{}) {
+		if _, ok := evt.(*events.Connected); ok {
+			select {
+			case connCh <- struct{}{}:
+			default:
 			}
 		}
+	})
+	defer c.RemoveEventHandler(handlerID)
 
-		// Wait for connection
-		select {
-		case <-connected:
-			c.logger.Infof("Successfully connected and authenticated")
-		case <-time.After(3 * time.Minute):
-			c.MarkDisconnected() // triggers watchdog to restart container
-			return fmt.Errorf("timeout waiting for QR code scan")
-		}
-	} else {
-		// Already paired — wait for the Connected event instead of sleeping.
-		connCh := make(chan struct{}, 1)
-		handlerID := c.AddEventHandler(func(evt interface{}) {
-			if _, ok := evt.(*events.Connected); ok {
-				select {
-				case connCh <- struct{}{}:
-				default:
-				}
-			}
-		})
-		defer c.RemoveEventHandler(handlerID)
+	if err := c.Client.Connect(); err != nil {
+		return fmt.Errorf("failed to connect: %v", err)
+	}
 
-		if err := c.Client.Connect(); err != nil {
-			return fmt.Errorf("failed to connect: %v", err)
-		}
-
-		select {
-		case <-connCh:
-			// Connected event received — handlerID cleaned up by defer
-		case <-time.After(30 * time.Second):
-			c.MarkDisconnected() // triggers watchdog to restart container
-			return fmt.Errorf("timed out waiting for WhatsApp connection")
-		}
+	select {
+	case <-connCh:
+		// Connected event received — handlerID cleaned up by defer
+	case <-time.After(30 * time.Second):
+		c.MarkDisconnected() // triggers watchdog to restart container
+		return fmt.Errorf("timed out waiting for WhatsApp connection")
 	}
 
 	c.logger.Infof("✓ Connected to WhatsApp!")
 	return nil
+}
+
+// PairingCode returns a QR code WhatsApp will accept right now.
+//
+// WhatsApp hands out a code that is valid for ~20 seconds and rotates it for
+// about two minutes, then ends the pairing session. The first call starts a
+// session and returns its first code; later calls return the session's latest
+// code while it is alive, and start a new session once WhatsApp has ended the
+// old one. Nothing is requested while nobody is asking, and a caller never
+// gets a code from a dead session.
+func (c *Client) PairingCode(ctx context.Context) (string, error) {
+	if c.Store.ID != nil {
+		return "", errors.New("already linked to a WhatsApp account")
+	}
+	c.pairMu.Lock()
+	defer c.pairMu.Unlock()
+
+	c.qrMu.Lock()
+	live := c.qrSession != nil && c.currentQR != ""
+	code := c.currentQR
+	c.qrMu.Unlock()
+	if live {
+		return code, nil
+	}
+	return c.startPairing(ctx)
+}
+
+// startPairing opens a fresh QR channel, connects, and returns the first code.
+// A goroutine keeps following the channel so currentQR stays the live code and
+// the session state is cleared when WhatsApp ends it or the phone links.
+// Caller holds pairMu.
+func (c *Client) startPairing(ctx context.Context) (string, error) {
+	qrChan, err := c.GetQRChannel(context.Background())
+	if err != nil {
+		return "", fmt.Errorf("open QR channel: %w", err)
+	}
+	if err := c.Client.Connect(); err != nil {
+		return "", fmt.Errorf("connect for pairing: %w", err)
+	}
+
+	done := make(chan struct{})
+	first := make(chan string, 1)
+	c.qrMu.Lock()
+	c.qrSession = done
+	c.currentQR = ""
+	c.qrMu.Unlock()
+
+	go func() {
+		defer func() {
+			c.qrMu.Lock()
+			if c.qrSession == done {
+				c.qrSession = nil
+				c.currentQR = ""
+			}
+			c.qrMu.Unlock()
+			close(done)
+		}()
+		sent := false
+		for evt := range qrChan {
+			switch evt.Event {
+			case "code":
+				c.setCurrentQR(evt.Code)
+				if !sent {
+					sent = true
+					first <- evt.Code
+					fmt.Fprintln(os.Stderr, "Scan this QR code with your WhatsApp app (or call get_setup_qr):")
+					qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stderr)
+				}
+			case "success":
+				c.logger.Infof("✓ Paired with WhatsApp")
+				return
+			default:
+				// "timeout" after ~2 minutes without a scan, or an error event.
+				// Drop the connection so the next get_setup_qr starts clean.
+				c.logger.Warnf("pairing session ended: %s", evt.Event)
+				c.Client.Disconnect()
+				return
+			}
+		}
+	}()
+
+	select {
+	case code := <-first:
+		return code, nil
+	case <-done:
+		return "", errors.New("pairing session ended before WhatsApp sent a code")
+	case <-time.After(20 * time.Second):
+		return "", errors.New("timed out waiting for a QR code from WhatsApp")
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
 }
 
 // Phase 5: Advanced Features
